@@ -187,7 +187,7 @@ def _routed_experts_sharding_configs(
     *,
     enable_ep: bool,
     enable_sp: bool,
-) -> tuple[ShardingConfig, ShardingConfig | None]:
+) -> tuple[ShardingConfig, ShardingConfig]:
     """Configs for RoutedExperts local SPMD and inner expert weight state."""
     if enable_ep:
         pre_experts_input_layout = (
@@ -195,16 +195,17 @@ def _routed_experts_sharding_configs(
             if enable_sp
             else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
-        state_shardings: dict[str, SpmdType] = {
-            name: expert_param_placement_sparse()
-            for name in _GROUPED_EXPERT_PARAM_NAMES
-        }
         experts_input_layout = dense_sequence_parallel_placement()
-        inner_experts_sharding_config = ShardingConfig(state_shardings=state_shardings)
+        expert_param_placement = expert_param_placement_sparse()
     else:
         pre_experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        inner_experts_sharding_config = None
+        expert_param_placement = dense_param_placement(tp=spmd.R)
+    inner_experts_sharding_config = ShardingConfig(
+        state_shardings={
+            name: expert_param_placement for name in _GROUPED_EXPERT_PARAM_NAMES
+        }
+    )
 
     tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
@@ -296,8 +297,8 @@ def set_moe_sharding_config(
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
-    Configures sparse expert parallelism when EP is enabled and leaves routed
-    experts unsharded otherwise:
+    Configures sparse expert parallelism when EP is enabled and replicates
+    routed experts otherwise:
 
     - ``moe`` (wrapper): input/output redistribution on ``{TP}``.
     - ``moe.router``: input and padding-mask redistribution to the router's
@@ -306,9 +307,9 @@ def set_moe_sharding_config(
     - ``moe.shared_experts.{w13,w2}``: dense-family TP plan (when
       ``moe_cfg.shared_experts is not None``).
     - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
-      ``state_shardings`` -- sparse ``{EP}`` when EP is enabled and unsharded
-      otherwise. The parent ``routed_experts`` holds the activation shardings
-      and local SPMD region.
+      ``state_shardings`` -- sparse ``{EP}`` when EP is enabled and
+      replicated on the dense axes otherwise. The parent ``routed_experts``
+      holds the activation shardings and local SPMD region.
 
     Args:
         moe_cfg: The ``MoE.Config`` instance to populate.

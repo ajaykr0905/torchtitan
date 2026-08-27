@@ -24,7 +24,7 @@ from torchtitan.distributed.utils import (
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.rl.model import gdn, vllm_registry as registry
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.gdn_backend import (
+from torchtitan.rl.model.linear_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionMetadata,
 )

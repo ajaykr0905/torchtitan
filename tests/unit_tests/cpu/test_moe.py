@@ -21,7 +21,10 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.decoder_sharding import token_id_placement
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    token_id_placement,
+)
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
@@ -425,7 +428,10 @@ class TestMoE(unittest.TestCase):
         )
         self.assertEqual(tp_type(routed.sharding_config.out_src_shardings), spmd.R)
         self.assertEqual(tp_type(routed.sharding_config.out_dst_shardings), spmd.R)
-        self.assertIsNone(routed.inner_experts.sharding_config)
+        inner_state_shardings = routed.inner_experts.sharding_config.state_shardings
+        self.assertEqual(set(inner_state_shardings), {"w1_EFD", "w2_EDF", "w3_EFD"})
+        for layout in inner_state_shardings.values():
+            self.assertEqual(layout, dense_param_placement(tp=spmd.R))
 
 
 if __name__ == "__main__":

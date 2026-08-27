@@ -119,15 +119,19 @@ def _set_gpt_oss_layer_sharding(
             enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
-        if enable_ep:
-            layer_cfg.moe.routed_experts.inner_experts.sharding_config = ShardingConfig(
-                state_shardings={
-                    name: expert_param_placement_sparse()
-                    for name in (
-                        "mlp1_weight_EGD",
-                        "mlp1_bias_EG",
-                        "mlp2_weight_EDF",
-                        "mlp2_bias_ED",
-                    )
-                }
-            )
+        expert_param_placement = (
+            expert_param_placement_sparse()
+            if enable_ep
+            else dense_param_placement(tp=spmd.R)
+        )
+        layer_cfg.moe.routed_experts.inner_experts.sharding_config = ShardingConfig(
+            state_shardings={
+                name: expert_param_placement
+                for name in (
+                    "mlp1_weight_EGD",
+                    "mlp1_bias_EG",
+                    "mlp2_weight_EDF",
+                    "mlp2_bias_ED",
+                )
+            }
+        )
