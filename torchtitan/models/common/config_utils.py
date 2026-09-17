@@ -80,6 +80,9 @@ TpGemmBackend = Literal["default", "dist_gemm"]
 
 def get_attention_config(
     backend: str,
+    *,
+    flex_attention: type[FlexInnerAttention] = FlexInnerAttention,
+    varlen_attention: type[VarlenInnerAttention] = VarlenInnerAttention,
 ) -> Module.Config:
     """Map backend string to an inner_attention config.
 
@@ -91,7 +94,7 @@ def get_attention_config(
     directly).
     """
     if backend == "flex":
-        return FlexInnerAttention.Config()
+        return flex_attention.Config()
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -99,11 +102,11 @@ def get_attention_config(
             raise ValueError(
                 "Flash backend of FlexInnerAttention is only supported on Hopper or Blackwell"
             )
-        return FlexInnerAttention.Config(
+        return flex_attention.Config(
             block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
         )
     elif backend == "varlen":
-        return VarlenInnerAttention.Config()
+        return varlen_attention.Config()
     elif backend == "sdpa":
         raise ValueError(
             "sdpa is no longer supported for language models; positions are "
