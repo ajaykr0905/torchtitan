@@ -198,6 +198,77 @@ class TestDecoderCpSharding(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             ContextParallelLoadBalancer.Config().build()
 
+    def test_contiguous_partitioner_exposes_token_partition(self):
+        cp_mesh = cast(DeviceMesh, SimpleNamespace(size=lambda _axis: 2))
+        partitioner = ContextParallelPartitioner(
+            input_dict={},
+            input_shardings={},
+            cp_mesh=cp_mesh,
+            load_balancer_config=None,
+        )
+
+        self.assertEqual(
+            partitioner.token_partition(8),
+            [[(0, 4)], [(4, 8)]],
+        )
+
+    def test_headtail_partitioner_exposes_token_partition(self):
+        input_T = torch.arange(8)
+        cp_mesh = cast(
+            DeviceMesh,
+            SimpleNamespace(size=lambda _axis: 2, device_type="cuda"),
+        )
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._HeadTailLoadBalancer"
+        ):
+            partitioner = ContextParallelPartitioner(
+                input_dict={"input": input_T},
+                input_shardings=None,
+                cp_mesh=cp_mesh,
+                load_balancer_config=HeadTailLoadBalancer.Config(),
+            )
+
+        self.assertEqual(
+            partitioner.token_partition(8),
+            [[(0, 2), (6, 8)], [(2, 4), (4, 6)]],
+        )
+
+    def test_token_partition_rejects_uneven_or_unsupported_partitions(self):
+        input_T = torch.arange(8)
+        block_mask = object.__new__(BlockMask)
+        cp_mesh = cast(
+            DeviceMesh,
+            SimpleNamespace(size=lambda _axis: 2, device_type="cuda"),
+        )
+        contiguous = ContextParallelPartitioner(
+            input_dict={},
+            input_shardings={},
+            cp_mesh=cp_mesh,
+            load_balancer_config=None,
+        )
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._HeadTailLoadBalancer"
+        ), mock.patch("torchtitan.distributed.context_parallel._PTRRLoadBalancer"):
+            headtail = ContextParallelPartitioner(
+                input_dict={"input": input_T},
+                input_shardings=None,
+                cp_mesh=cp_mesh,
+                load_balancer_config=HeadTailLoadBalancer.Config(),
+            )
+            ptrr = ContextParallelPartitioner(
+                input_dict={"input": input_T, "attention_masks": block_mask},
+                input_shardings=None,
+                cp_mesh=cp_mesh,
+                load_balancer_config=PTRRLoadBalancer.Config(),
+            )
+
+        with self.assertRaisesRegex(ValueError, "divisible by the CP degree"):
+            contiguous.token_partition(7)
+        with self.assertRaisesRegex(ValueError, "divisible by 4"):
+            headtail.token_partition(7)
+        with self.assertRaisesRegex(ValueError, "does not expose"):
+            ptrr.token_partition(8)
+
     def test_no_shardable_inputs_is_a_noop(self):
         batch = {"attention_masks": object()}
         partitioner = ContextParallelPartitioner(

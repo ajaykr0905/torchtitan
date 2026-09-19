@@ -196,9 +196,8 @@ class KimiK3TransformerBlock(Module):
             kda_metadata = attention_metadata["kda"] if attention_metadata else None
             h_TD = self.delta_attention(
                 h_TD,
-                kda_metadata.varlen if kda_metadata is not None else None,
+                kda_metadata,
                 positions,
-                routing=(kda_metadata.cp_routing if kda_metadata is not None else None),
             )
         prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
 
