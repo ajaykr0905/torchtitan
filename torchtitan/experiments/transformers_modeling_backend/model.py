@@ -31,8 +31,11 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import quadratic_attention_flops_per_token
-from torchtitan.protocols.model import BaseModel
+from torchtitan.models.utils import (
+    build_input_token_flops_estimator,
+    quadratic_attention_flops_per_token,
+)
+from torchtitan.protocols.model import BaseModel, FlopsEstimator
 from torchtitan.protocols.module import Module, ModuleDict
 
 from .parallelize import parallelize_hf_transformers
@@ -565,12 +568,19 @@ class HFTransformerModel(BaseModel):
 
             return self
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def build_flops_estimator(
+            self,
+            model: nn.Module,
+            *,
+            seq_len: int,
+        ) -> FlopsEstimator:
+            return build_input_token_flops_estimator(
+                self._flops_per_token(model, seq_len)
+            )
+
+        def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
             assert isinstance(model, HFTransformerModel)
             named_parameters = list(model.named_parameters())
-            nparams = sum(param.numel() for _, param in named_parameters)
             parameter_weights = {
                 id(param): Fraction(1) for _, param in named_parameters
             }
@@ -647,7 +657,7 @@ class HFTransformerModel(BaseModel):
                         ["full_attention"] * (len(model.layers) - len(layer_types))
                     )
 
-            attention_op_flops = 0
+            attention_flops_per_token = 0
             unsupported_layer_types = set()
             for layer_type in layer_types:
                 if layer_type in ("attention", "full_attention"):
@@ -673,7 +683,7 @@ class HFTransformerModel(BaseModel):
                         layer_qk_head_dim = global_head_dim
                         layer_v_head_dim = global_head_dim
 
-                attention_op_flops += quadratic_attention_flops_per_token(
+                attention_flops_per_token += quadratic_attention_flops_per_token(
                     num_heads=self.n_heads,
                     qk_head_dim=layer_qk_head_dim,
                     v_head_dim=layer_v_head_dim,
@@ -688,12 +698,8 @@ class HFTransformerModel(BaseModel):
                     "approximating them as full attention."
                 )
 
-            num_flops_per_token = 6 * active_nparams + attention_op_flops
-            logger.info(
-                f"Total parameter count: {nparams:,}, "
-                f"active parameters: {active_nparams:,}"
-            )
-            return nparams, num_flops_per_token
+            num_flops_per_token = 6 * active_nparams + attention_flops_per_token
+            return num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()

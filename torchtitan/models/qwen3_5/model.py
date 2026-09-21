@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -41,10 +42,12 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
+    active_parameter_flops_per_token,
+    build_input_token_flops_estimator,
+    get_packed_vision_grids,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import Module
 
 from .gdn import GatedDeltaNet
@@ -115,6 +118,14 @@ class Qwen35Attention(BaseAttention):
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
         inner_attention: Module.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                seq_len=seq_len,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -345,37 +356,44 @@ class Qwen35Model(MultimodalModel):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            # The vision encoder cost scales with patches rather than text
-            # sequence length, so this remains a decoder-only MFU estimate.
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
             qwen_model = cast("Qwen35Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
+            parameter_flops_per_token = active_parameter_flops_per_token(
                 model,
-                modules_excluded_from_active_params=(qwen_model.vision_encoder,),
+                excluded_modules=(qwen_model.vision_encoder,),
             )
-            attention_op_flops = 0
+            attention_flops_per_token = 0
             for layer in self.layers:
-                if isinstance(layer.attention, Qwen35Attention.Config):
+                if layer.attention is not None:
                     attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=attention.head_dim,
-                        v_head_dim=attention.head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.delta_net, GatedDeltaNet.Config):
-                    delta_net = layer.delta_net
-                    num_value_heads = (
-                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                    )
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=num_value_heads,
-                        key_head_dim=delta_net.key_head_dim,
-                        v_head_dim=delta_net.value_head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
+                else:
+                    assert layer.delta_net is not None
+                    attention = layer.delta_net
+                attention_flops_per_token += attention.flops_per_token(seq_len)
+            flops_per_token = parameter_flops_per_token + attention_flops_per_token
+            text_estimator = build_input_token_flops_estimator(flops_per_token)
+            vision_encoder = qwen_model.vision_encoder
+            if vision_encoder is None:
+                return text_estimator
+
+            assert self.vision_encoder is not None
+            vision_estimator = self.vision_encoder.build_vision_flops_estimator(
+                vision_encoder
+            )
+
+            def estimate_flops(batch: Mapping[str, Any]) -> int:
+                vision_grids = get_packed_vision_grids(
+                    batch,
+                    modality_fields=(
+                        ("pixel_values", "grid_thw"),
+                        ("pixel_values_videos", "grid_thw_videos"),
+                    ),
+                )
+                return text_estimator(batch) + vision_estimator(vision_grids)
+
+            return estimate_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

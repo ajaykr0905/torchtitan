@@ -247,7 +247,6 @@ class Trainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
         self.metrics_processor.optimizers = engine.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
@@ -348,6 +347,12 @@ class Trainer(Configurable):
                 local_valid_tokens += microbatch.num_valid_tokens
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
+
+        step_num_flops = sum(
+            engine.estimate_flops(microbatch.as_input_dict())
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        )
         sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
         # Keep the global token count on device so loss normalization does not
@@ -392,6 +397,7 @@ class Trainer(Configurable):
         # scheduler advances in engine.optimizer_step().
         lr_metrics = engine.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optimizer_step()
+        self.metrics_processor.record_step_flops(step_num_flops)
 
         # log metrics
         if not should_log:
@@ -402,9 +408,8 @@ class Trainer(Configurable):
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
             if parallel_dims.dp_cp_enabled:
-                loss_mesh = parallel_dims.get_optional_mesh("loss")
-
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
                 # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
@@ -433,6 +438,20 @@ class Trainer(Configurable):
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
 
+            mean_num_flops_tensor = dist_utils.mean_flops_tensor(
+                self.metrics_processor.num_flops_since_last_log,
+                device=engine.device,
+                mesh=loss_mesh,
+                divisor=(
+                    parallel_dims.dp_replicate
+                    * parallel_dims.dp_shard
+                    * parallel_dims.cp
+                ),
+            )
+            grad_norm, mean_num_flops = dist_utils.materialize_scalar_tensors(
+                [grad_norm, mean_num_flops_tensor]
+            )
+
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
@@ -442,8 +461,9 @@ class Trainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            float(grad_norm.item()),
+            grad_norm,
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
 
     @record

@@ -237,6 +237,7 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
+        step_num_flops = 0
         microbatch_metrics: list[dict[str, float]] = []
         num_accumulation_steps = len(training_data)
         prepared_global_valid_tokens = engine.prepare_step(
@@ -246,6 +247,8 @@ class Trainer(Configurable):
 
         for microbatch_index, rank_batches in enumerate(training_data):
             local_batch = rank_batches[self.dp_rank]
+
+            step_num_flops += engine.estimate_flops(local_batch.as_input_dict())
 
             engine.forward_backward_microbatch(
                 microbatch_group=[local_batch],
@@ -267,6 +270,16 @@ class Trainer(Configurable):
                 )
             )
 
+        parallel_dims = engine.parallel_dims
+        self._step_mean_num_flops_tensor = dist_utils.mean_flops_tensor(
+            step_num_flops,
+            device=engine.device,
+            mesh=parallel_dims.get_optional_mesh("loss"),
+            divisor=(
+                parallel_dims.dp_replicate * parallel_dims.dp_shard * parallel_dims.cp
+            ),
+        )
+
         return combine_microbatch_metrics(microbatch_metrics)
 
     @sl.log_trace_span("optimizer_step")
@@ -281,17 +294,7 @@ class Trainer(Configurable):
         lr_metrics = engine.lr_schedulers.get_metrics()
 
         grad_norm = engine.optimizer_step()
-
-        # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
-        # trainer metrics interface while preserving controller-side aggregation.
-        performance = compute_training_performance_metrics(
-            num_tokens=self._step_num_tokens_per_dp_rank,
-            elapsed_time=time.perf_counter() - self._step_compute_start,
-            non_data_parallel_size=engine.parallel_dims.non_data_parallel_size,
-            num_flops_per_token=engine.num_flops_per_token,
-            gpu_peak_flops=self.gpu_peak_flops,
-            has_quantization=engine.has_quantization,
-        )
+        elapsed_time = time.perf_counter() - self._step_compute_start
 
         engine.save_checkpoint(last_step=last_step)
         engine.step_profiler()
@@ -303,10 +306,25 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
 
+        grad_norm_value, mean_num_flops = dist_utils.materialize_scalar_tensors(
+            [grad_norm, self._step_mean_num_flops_tensor]
+        )
+
+        # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
+        # trainer metrics interface while preserving controller-side aggregation.
+        performance = compute_training_performance_metrics(
+            num_tokens=self._step_num_tokens_per_dp_rank,
+            elapsed_time=elapsed_time,
+            non_data_parallel_size=engine.parallel_dims.non_data_parallel_size,
+            num_flops=mean_num_flops,
+            gpu_peak_flops=self.gpu_peak_flops,
+            has_quantization=engine.has_quantization,
+        )
+
         return OptimizerStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "trainer/grad_norm/mean": float(grad_norm.item()),
+                "trainer/grad_norm/mean": grad_norm_value,
                 **{f"trainer/{key}": value for key, value in lr_metrics.items()},
                 "trainer/policy_version": float(self.policy_version),
                 "trainer/tokens_per_second": performance["tokens_per_second"],

@@ -22,6 +22,7 @@ Shape suffixes:
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 import torch
 import torch_remat as remat
@@ -38,6 +39,10 @@ compiled_create_block_mask = torch.compile(create_block_mask)
 RopeApply = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
 ]
+
+
+VisionGrid: TypeAlias = tuple[int, int, int]
+VisionFlopsEstimator: TypeAlias = Callable[[tuple[VisionGrid, ...]], int]
 
 
 def create_block_diagonal_mask(
@@ -119,6 +124,9 @@ class VisionAttention(Module):
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
+
+        def flops_per_query_key_pair(self) -> int:
+            return 6 * self.num_heads * 2 * (self.dim // self.num_heads)
 
     def __init__(self, config: Config):
         super().__init__()

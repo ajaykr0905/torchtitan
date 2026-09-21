@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from fractions import Fraction
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -21,8 +22,8 @@ from torch.distributed.tensor.placement_types import (
 
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.vision_encoder import VisionGrid
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 
 logger = logging.getLogger(__name__)
 
@@ -458,12 +459,17 @@ def delta_rule_flops_per_token(
     return 6 * 3 * num_heads * key_head_dim * v_head_dim
 
 
-def get_nparams_and_active_nparams(
+def parameter_flops_per_token(module: nn.Module) -> int:
+    """Return training FLOPs when every parameter is used once per token."""
+    return 6 * sum(param.numel() for param in module.parameters())
+
+
+def active_parameter_flops_per_token(
     model: nn.Module,
     *,
-    modules_excluded_from_active_params: Iterable[nn.Module | None] = (),
-) -> tuple[int, int]:
-    """Count total and matmul-active parameters for a native decoder.
+    excluded_modules: Iterable[nn.Module | None] = (),
+) -> int:
+    """Estimate training FLOPs per token from matmul-active parameters.
 
     Routed-expert parameters are weighted by the owning MoE module's active
     expert ratio. Embedding tables are excluded unless their parameter is shared
@@ -472,16 +478,15 @@ def get_nparams_and_active_nparams(
 
     Args:
         model: Built model whose parameters are counted.
-        modules_excluded_from_active_params: Module subtrees whose cost does not
-            scale per text token, such as a vision encoder.
+        excluded_modules: Module subtrees whose cost does not scale per text
+            token, such as a vision encoder.
 
     Returns:
-        Total parameter count and effective parameter count for the conventional
-        ``6 * active_parameters`` training FLOP estimate.
+        The conventional ``6 * active_parameters`` training FLOP estimate per
+        token.
     """
-    named_parameters = list(model.named_parameters())
-    nparams = sum(param.numel() for _, param in named_parameters)
-    parameter_weights = {id(param): Fraction(1) for _, param in named_parameters}
+    parameters = list(model.parameters())
+    parameter_weights = {id(param): Fraction(1) for param in parameters}
 
     for module in model.modules():
         if isinstance(module, MoE):
@@ -503,19 +508,44 @@ def get_nparams_and_active_nparams(
                 if id(param) not in lm_head_parameter_ids:
                     parameter_weights[id(param)] = Fraction(0)
 
-    for module_excluded_from_active_params in modules_excluded_from_active_params:
-        if module_excluded_from_active_params is None:
+    for excluded_module in excluded_modules:
+        if excluded_module is None:
             continue
-        for param in module_excluded_from_active_params.parameters():
+        for param in excluded_module.parameters():
             parameter_weights[id(param)] = Fraction(0)
 
-    nparams_for_matmul = sum(
-        param.numel() * parameter_weights[id(param)] for _, param in named_parameters
+    num_parameters = sum(param.numel() for param in parameters)
+    usage_weighted_nparams = sum(
+        param.numel() * parameter_weights[id(param)] for param in parameters
     )
-    assert nparams_for_matmul.denominator == 1
-    active_nparams = nparams_for_matmul.numerator
-
+    assert usage_weighted_nparams.denominator == 1
+    num_active_parameters = usage_weighted_nparams.numerator
     logger.info(
-        f"Total parameter count: {nparams:,}, active parameters: {active_nparams:,}"
+        f"Total parameter count: {num_parameters:,}, "
+        f"active parameters: {num_active_parameters:,}"
     )
-    return nparams, active_nparams
+    return 6 * num_active_parameters
+
+
+def get_packed_vision_grids(
+    batch: Mapping[str, Any],
+    *,
+    modality_fields: tuple[tuple[str, str], ...],
+) -> tuple[VisionGrid, ...]:
+    """Extract packed vision grids from a raw CPU batch."""
+    grids: list[VisionGrid] = []
+    for pixel_values_key, grid_thw_key in modality_fields:
+        if batch.get(pixel_values_key) is None:
+            continue
+        grids.extend(
+            (temporal, grid_h, grid_w)
+            for temporal, grid_h, grid_w in batch[grid_thw_key].tolist()
+        )
+    return tuple(grids)
+
+
+def build_input_token_flops_estimator(
+    flops_per_token: int,
+) -> Callable[[Mapping[str, Any]], int]:
+    """Build an estimator for work that scales with input token count."""
+    return lambda batch: flops_per_token * batch["input"].numel()

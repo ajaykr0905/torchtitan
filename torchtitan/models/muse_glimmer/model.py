@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -46,9 +47,13 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
+    active_parameter_flops_per_token,
+    build_input_token_flops_estimator,
+    get_packed_vision_grids,
+    parameter_flops_per_token,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import Module
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
@@ -104,6 +109,16 @@ class Attention(GQAttention):
             # ``window_size``. Keep both in sync via this alias (mirrors gpt_oss's
             # field name without renaming the flex-path usages).
             return self.window_size
+
+        def flops_per_token(self, seq_len: int) -> int:
+            head_dim = self.head_dim or self.dim // self.n_heads
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=self.window_size,
+            )
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -318,36 +333,55 @@ class MuseGlimmerModel(MultimodalModel):
                 enable_sp=parallelism.enable_sequence_parallel,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            # Vision modules run per image rather than per text token.
+        def build_flops_estimator(
+            self,
+            model: nn.Module,
+            *,
+            seq_len: int,
+        ) -> FlopsEstimator:
             muse_model = cast("MuseGlimmerModel", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
+            decoder_flops_per_token = active_parameter_flops_per_token(
                 model,
-                modules_excluded_from_active_params=(
+                excluded_modules=(
                     muse_model.vision_encoder,
                     muse_model.vision_adapter,
                     muse_model.vision_projection,
                     muse_model.perception_emb_norm,
                 ),
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
+            decoder_flops_per_token += sum(
+                layer.attention.flops_per_token(seq_len) for layer in self.layers
+            )
+            vision_encoder = muse_model.vision_encoder
+            text_estimator = build_input_token_flops_estimator(decoder_flops_per_token)
+            if vision_encoder is None:
+                return text_estimator
+
+            assert muse_model.vision_adapter is not None
+            assert muse_model.vision_projection is not None
+            assert muse_model.perception_emb_norm is not None
+            assert self.vision_encoder is not None
+            vision_output_token_flops = sum(
+                parameter_flops_per_token(module)
+                for module in (
+                    muse_model.vision_adapter,
+                    muse_model.vision_projection,
+                    muse_model.perception_emb_norm,
                 )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.window_size,
+            )
+            vision_estimator = self.vision_encoder.build_vision_flops_estimator(
+                vision_encoder,
+                output_token_flops=vision_output_token_flops,
+            )
+
+            def estimate_flops(batch: Mapping[str, Any]) -> int:
+                vision_grids = get_packed_vision_grids(
+                    batch,
+                    modality_fields=(("pixel_values", "grid_thw"),),
                 )
-            return nparams, 6 * active_nparams + attention_op_flops
+                return text_estimator(batch) + vision_estimator(vision_grids)
+
+            return estimate_flops
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

@@ -19,9 +19,10 @@ from torchtitan.models.deepseek_v3.mtp import (
     roll_mtp_sequence,
 )
 from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
+    active_parameter_flops_per_token,
+    build_input_token_flops_estimator,
 )
+from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
@@ -198,55 +199,45 @@ class DeepSeekV4Model(Decoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
             """Estimate DeepSeek V4 training FLOPs from the final model config."""
             deepseek_v4_model = cast(DeepSeekV4Model, model)
-            nparams, active_nparams = get_nparams_and_active_nparams(deepseek_v4_model)
+            param_flops_per_token = active_parameter_flops_per_token(deepseek_v4_model)
 
-            attention_op_flops = 0
-            for layers in (self.layers, self.mtp_layers or ()):
-                for layer in layers:
-                    attention = layer.attention
-                    inner_attention = attention.inner_attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=attention.head_dim,
-                        v_head_dim=attention.head_dim,
-                        seq_len=seq_len,
-                        sliding_window_size=inner_attention.window_size,
-                    )
-
-                    if attention.compress_ratio > 1:
-                        compressed_seq_len = seq_len // attention.compress_ratio
-                        if attention.compress_ratio == 4:
-                            attention_op_flops += (
-                                6
-                                * attention.index_n_heads
-                                * attention.index_head_dim
-                                * compressed_seq_len
-                            )
-                            compressed_seq_len = min(
-                                compressed_seq_len, inner_attention.index_topk
-                            )
-                        attention_op_flops += quadratic_attention_flops_per_token(
-                            num_heads=attention.n_heads,
-                            qk_head_dim=attention.head_dim,
-                            v_head_dim=attention.head_dim,
-                            seq_len=compressed_seq_len,
-                        )
-
-            active_nparams += len(deepseek_v4_model.mtp_layers) * sum(
-                param.numel() for param in deepseek_v4_model.lm_head.parameters()
-            )
-            active_nparams += (self.hc_mult - 1) * sum(
-                param.numel()
-                for mtp_layer in deepseek_v4_model.mtp_layers
-                for param in cast("MTPBlock", mtp_layer).h_proj.parameters()
+            attention_flops_per_token = sum(
+                layer.attention.flops_per_token(seq_len)
+                for layers in (self.layers, self.mtp_layers or ())
+                for layer in layers
             )
 
-            return nparams, 6 * active_nparams + attention_op_flops
+            mtp_lm_head_flops_per_token = (
+                6
+                * len(deepseek_v4_model.mtp_layers)
+                * sum(param.numel() for param in deepseek_v4_model.lm_head.parameters())
+            )
+            mtp_h_proj_flops_per_token = (
+                6
+                * (self.hc_mult - 1)
+                * sum(
+                    param.numel()
+                    for mtp_layer in deepseek_v4_model.mtp_layers
+                    for param in cast("MTPBlock", mtp_layer).h_proj.parameters()
+                )
+            )
+
+            return (
+                param_flops_per_token
+                + mtp_lm_head_flops_per_token
+                + mtp_h_proj_flops_per_token
+                + attention_flops_per_token
+            )
+
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            return build_input_token_flops_estimator(
+                self._flops_per_token(model, seq_len)
+            )
 
     def __init__(self, config: Config):
         super().__init__(config)

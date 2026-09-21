@@ -260,7 +260,6 @@ class FaultTolerantTrainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = engine.device_memory_monitor
@@ -354,6 +353,12 @@ class FaultTolerantTrainer(Configurable):
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
 
+        step_num_flops = sum(
+            engine.estimate_flops(microbatch.as_input_dict())
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        )
+
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
         global_valid_tokens = torch.tensor(
@@ -388,6 +393,7 @@ class FaultTolerantTrainer(Configurable):
                     accumulated_loss.add_(detached_loss)
 
         grad_norm = engine.optimizer_step()
+        self.metrics_processor.record_step_flops(step_num_flops)
 
         # log metrics
         if not should_log:
@@ -395,11 +401,10 @@ class FaultTolerantTrainer(Configurable):
 
         assert accumulated_loss is not None
 
+        ft_pg = engine.ft_manager.loss_sync_pg
+        live_ft_size = ft_pg.size() if ft_pg is not None else 1
+        loss_mesh = parallel_dims.get_optional_mesh("loss")
         if parallel_dims.dp_cp_enabled:
-            # FT addition: use ft_manager.loss_sync_pg for extra process group
-            ft_pg = engine.ft_manager.loss_sync_pg
-            loss_mesh = parallel_dims.get_optional_mesh("loss")
-
             # For global_avg_loss, we want the average loss across all ranks:
             # accumulated_loss = local_loss_sum / global_valid_tokens
             # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
@@ -423,13 +428,28 @@ class FaultTolerantTrainer(Configurable):
                     ft_pg,
                 ),
             )
-            # ft_pg is None in semi-sync training.
             if ft_pg is not None:
                 # Avoid artificial jumps in logged loss when replicas leave or rejoin.
-                global_avg_loss /= ft_pg.size()
+                global_avg_loss /= live_ft_size
         else:
             global_avg_loss = global_max_loss = accumulated_loss.item()
             global_ntokens_seen = engine.ntokens_seen
+
+        mean_num_flops_tensor = dist_utils.mean_flops_tensor(
+            self.metrics_processor.num_flops_since_last_log,
+            device=engine.device,
+            mesh=loss_mesh,
+            divisor=(
+                parallel_dims.dp_replicate
+                * parallel_dims.dp_shard
+                * parallel_dims.cp
+                * live_ft_size
+            ),
+            extra_pg=ft_pg,
+        )
+        grad_norm, mean_num_flops = dist_utils.materialize_scalar_tensors(
+            [grad_norm, mean_num_flops_tensor]
+        )
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -440,8 +460,9 @@ class FaultTolerantTrainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            grad_norm,
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
 
     @record

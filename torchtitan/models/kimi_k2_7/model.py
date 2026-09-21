@@ -10,6 +10,7 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -37,10 +38,9 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.deepseek_v3.model import (
-    DeepSeekV3Model,
-    get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
-)
+from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+from torchtitan.models.utils import get_packed_vision_grids
+from torchtitan.protocols import FlopsEstimator
 
 from .sharding import set_kimi_k2_5_sharding_config
 from .state_dict_adapter import KimiK25StateDictAdapter
@@ -106,16 +106,39 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def _flops_excluded_modules(
+            self, model: nn.Module
+        ) -> tuple[nn.Module | None, ...]:
             kimi_model = cast("KimiK25Model", model)
-            return get_kimi_k2_7_nparams_and_flops(
-                self,
-                model,
-                seq_len,
-                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
+            return (kimi_model.vision_encoder,)
+
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            text_estimator = DeepSeekV3Model.Config.build_flops_estimator(
+                self, model, seq_len=seq_len
             )
+            kimi_model = cast("KimiK25Model", model)
+            vision_encoder = kimi_model.vision_encoder
+            if vision_encoder is None:
+                return text_estimator
+
+            assert self.vision_encoder is not None
+            vision_estimator = self.vision_encoder.build_vision_flops_estimator(
+                vision_encoder
+            )
+
+            def estimate_flops(batch: Mapping[str, Any]) -> int:
+                vision_grids = get_packed_vision_grids(
+                    batch,
+                    modality_fields=(
+                        ("pixel_values", "grid_thw"),
+                        ("pixel_values_videos", "grid_thw_videos"),
+                    ),
+                )
+                return text_estimator(batch) + vision_estimator(vision_grids)
+
+            return estimate_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

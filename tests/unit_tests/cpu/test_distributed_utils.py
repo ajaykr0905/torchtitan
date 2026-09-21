@@ -147,3 +147,88 @@ def test_dense_sp_state_compiles_with_checkpoint() -> None:
         sparse_mesh=None,
         dense_sp_enabled=False,
     )
+
+
+def test_mean_flops_tensor_uses_float64_sum_and_device_division():
+    device = torch.device("cpu")
+    mesh = cast(DeviceMesh, object())
+    extra_pg = cast(torch.distributed.ProcessGroup, object())
+    reduced = torch.tensor(84.0, dtype=torch.float64, device=device)
+    tensor_constructor = torch.tensor
+
+    with (
+        patch.object(
+            dist_utils.torch,
+            "tensor",
+            wraps=tensor_constructor,
+        ) as make_tensor,
+        patch.object(
+            dist_utils,
+            "dist_sum_tensor",
+            return_value=reduced,
+        ) as reduce,
+        patch.object(
+            torch.Tensor,
+            "item",
+            side_effect=AssertionError("unexpected host materialization"),
+        ),
+        patch.object(
+            torch.Tensor,
+            "tolist",
+            side_effect=AssertionError("unexpected host materialization"),
+        ),
+    ):
+        result = dist_utils.mean_flops_tensor(
+            21,
+            device=device,
+            mesh=mesh,
+            divisor=4,
+            extra_pg=extra_pg,
+        )
+
+    make_tensor.assert_called_once_with(21, dtype=torch.float64, device=device)
+    reduce.assert_called_once()
+    assert reduce.call_args.args[0].dtype is torch.float64
+    assert reduce.call_args.args[0].device == device
+    assert reduce.call_args.kwargs == {"mesh": mesh, "extra_pg": extra_pg}
+    torch.testing.assert_close(result, torch.tensor(21.0, dtype=torch.float64))
+
+
+def test_materialize_scalar_tensors_packs_one_host_read():
+    values = [torch.tensor(2), torch.tensor([3.5])]
+    original_tolist = torch.Tensor.tolist
+    num_tolist_calls = 0
+
+    def record_tolist(value):
+        nonlocal num_tolist_calls
+        num_tolist_calls += 1
+        return original_tolist(value)
+
+    with patch.object(torch.Tensor, "tolist", record_tolist):
+        result = dist_utils.materialize_scalar_tensors(values)
+
+    assert result == (2.0, 3.5)
+    assert num_tolist_calls == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_materialize_scalar_tensors_supports_mixed_devices():
+    values = [
+        torch.tensor(2.0, device="cuda"),
+        torch.tensor(3),
+        torch.tensor([4.5], device="cuda"),
+    ]
+    original_tolist = torch.Tensor.tolist
+    num_cuda_tolist_calls = 0
+
+    def record_tolist(value):
+        nonlocal num_cuda_tolist_calls
+        if value.device.type == "cuda":
+            num_cuda_tolist_calls += 1
+        return original_tolist(value)
+
+    with patch.object(torch.Tensor, "tolist", record_tolist):
+        result = dist_utils.materialize_scalar_tensors(values)
+
+    assert result == (2.0, 3.0, 4.5)
+    assert num_cuda_tolist_calls == 1

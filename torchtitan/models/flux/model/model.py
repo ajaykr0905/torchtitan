@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast, Self
 
@@ -39,7 +40,7 @@ from torchtitan.models.flux.utils import (
     preprocess_data,
 )
 from torchtitan.models.utils import quadratic_attention_flops_per_token
-from torchtitan.protocols import BaseModel
+from torchtitan.protocols import BaseModel, FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 
 from .state_dict_adapter import FluxStateDictAdapter
@@ -89,9 +90,20 @@ class FluxModel(BaseModel):
 
             set_flux_sharding_config(self)
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def build_flops_estimator(
+            self,
+            model: nn.Module,
+            *,
+            seq_len: int,
+        ) -> FlopsEstimator:
+            cached_flops_per_token = self._flops_per_token(model, seq_len)
+
+            def estimate_flops(batch: Mapping[str, Any]) -> int:
+                return batch["labels"].shape[0] * seq_len * cached_flops_per_token
+
+            return estimate_flops
+
+        def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
             nparams = sum(p.numel() for p in model.parameters())
 
             # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
@@ -156,7 +168,7 @@ class FluxModel(BaseModel):
                 * self.depth
             )
 
-            return nparams, num_flops_per_token
+            return num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()
