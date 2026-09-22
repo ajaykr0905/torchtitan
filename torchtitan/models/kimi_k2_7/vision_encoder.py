@@ -33,7 +33,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionGrid,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import parameter_flops_per_token
+from torchtitan.models.utils import active_parameter_flops_per_unit
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -492,16 +492,18 @@ class KimiK25VisionEncoder(MoonViTEncoder):
             encoder: "KimiK25VisionEncoder",
         ) -> VisionFlopsEstimator:
             input_patch_flops = sum(
-                parameter_flops_per_token(module)
+                active_parameter_flops_per_unit(module)
                 for module in (
                     encoder.patch_embed,
                     encoder.layers,
                     encoder.final_norm,
                 )
             )
-            spatial_patch_flops = parameter_flops_per_token(encoder.projector.pre_norm)
+            spatial_patch_flops = active_parameter_flops_per_unit(
+                encoder.projector.pre_norm
+            )
             output_token_flops = sum(
-                parameter_flops_per_token(module)
+                active_parameter_flops_per_unit(module)
                 for module in (
                     encoder.projector.linear_1,
                     encoder.projector.linear_2,

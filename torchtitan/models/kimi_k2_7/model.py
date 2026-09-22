@@ -33,13 +33,13 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    get_packed_vision_grids,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
-from torchtitan.models.utils import get_packed_vision_grids
 from torchtitan.protocols import FlopsEstimator
 
 from .sharding import set_kimi_k2_5_sharding_config
@@ -115,13 +115,13 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
-            text_estimator = DeepSeekV3Model.Config.build_flops_estimator(
+            decoder_estimator = DeepSeekV3Model.Config.build_flops_estimator(
                 self, model, seq_len=seq_len
             )
             kimi_model = cast("KimiK25Model", model)
             vision_encoder = kimi_model.vision_encoder
             if vision_encoder is None:
-                return text_estimator
+                return decoder_estimator
 
             assert self.vision_encoder is not None
             vision_estimator = self.vision_encoder.build_vision_flops_estimator(
@@ -136,7 +136,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                         ("pixel_values_videos", "grid_thw_videos"),
                     ),
                 )
-                return text_estimator(batch) + vision_estimator(vision_grids)
+                return decoder_estimator(batch) + vision_estimator(vision_grids)
 
             return estimate_flops
 

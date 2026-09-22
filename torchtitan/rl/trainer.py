@@ -237,7 +237,7 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
-        step_num_flops = 0
+        optimizer_step_flops = 0
         microbatch_metrics: list[dict[str, float]] = []
         num_accumulation_steps = len(training_data)
         prepared_global_valid_tokens = engine.prepare_step(
@@ -248,7 +248,7 @@ class Trainer(Configurable):
         for microbatch_index, rank_batches in enumerate(training_data):
             local_batch = rank_batches[self.dp_rank]
 
-            step_num_flops += engine.estimate_flops(local_batch.as_input_dict())
+            optimizer_step_flops += engine.estimate_flops(local_batch.as_input_dict())
 
             engine.forward_backward_microbatch(
                 microbatch_group=[local_batch],
@@ -271,8 +271,8 @@ class Trainer(Configurable):
             )
 
         parallel_dims = engine.parallel_dims
-        self._step_mean_num_flops_tensor = dist_utils.mean_flops_tensor(
-            step_num_flops,
+        self._optimizer_step_mean_num_flops_tensor = dist_utils.mean_flops_tensor(
+            optimizer_step_flops,
             device=engine.device,
             mesh=parallel_dims.get_optional_mesh("loss"),
             divisor=(
@@ -307,7 +307,7 @@ class Trainer(Configurable):
         )
 
         grad_norm_value, mean_num_flops = dist_utils.materialize_scalar_tensors(
-            [grad_norm, self._step_mean_num_flops_tensor]
+            [grad_norm, self._optimizer_step_mean_num_flops_tensor]
         )
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared

@@ -255,7 +255,7 @@ def test_forward_backward_accumulates_microbatch_metrics_and_flops() -> None:
             mesh=loss_mesh,
             divisor=4,
         )
-        assert trainer._step_mean_num_flops_tensor is reduced_num_flops
+        assert trainer._optimizer_step_mean_num_flops_tensor is reduced_num_flops
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
@@ -301,7 +301,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
         mean_num_flops_tensor = torch.tensor(2000.0, dtype=torch.float64)
-        trainer._step_mean_num_flops_tensor = mean_num_flops_tensor
+        trainer._optimizer_step_mean_num_flops_tensor = mean_num_flops_tensor
 
         with (
             patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),

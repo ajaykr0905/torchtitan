@@ -34,8 +34,7 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    build_input_token_flops_estimator,
+    active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols import FlopsEstimator
@@ -246,9 +245,9 @@ class GptOssModel(Decoder):
                 layer.attention.flops_per_token(seq_len) for layer in self.layers
             )
             flops_per_token = (
-                active_parameter_flops_per_token(model) + attention_flops_per_token
+                active_parameter_flops_per_unit(model) + attention_flops_per_token
             )
-            return build_input_token_flops_estimator(flops_per_token)
+            return lambda batch: flops_per_token * batch["input"].numel()
 
     def __init__(self, config: Config):
         super().__init__(config)

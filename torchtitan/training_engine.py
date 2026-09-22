@@ -49,6 +49,7 @@ from torchtitan.distributed.cuda_graph import (
     wrap_with_cuda_graph,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.utils import get_parameter_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -189,6 +190,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
     model_param_count: int
+    model_active_param_count: int
     flops_estimator: FlopsEstimator
     has_quantization: bool
     loss_is_finite: torch.Tensor
@@ -302,7 +304,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             if adapter_cls is not None
             else None
         )
-        self.model_param_count = sum(param.numel() for param in model.parameters())
+        (self.model_param_count, self.model_active_param_count) = get_parameter_counts(
+            model
+        )
         self.flops_estimator = self.model_config.build_flops_estimator(
             model,
             seq_len=self.config.training.max_context_length,
@@ -366,7 +370,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         logger.info(
             f"Model {type(self.model_config).__qualname__} size: "
-            f"{self.model_param_count:,} total parameters"
+            f"{self.model_param_count:,} total parameters, "
+            f"{self.model_active_param_count:,} active parameters"
         )
 
     def _initialize_optimizer(self) -> None:

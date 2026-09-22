@@ -46,15 +46,17 @@ def _ft_metric_boundary_trainer(
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=should_log),
         log=MagicMock(),
-        record_step_flops=MagicMock(),
+        record_optimizer_step_flops=MagicMock(),
         ntokens_since_last_log=0,
         num_flops_since_last_log=0,
         data_loading_times=[],
     )
-    metrics_processor.record_step_flops.side_effect = lambda num_flops: setattr(
-        metrics_processor,
-        "num_flops_since_last_log",
-        metrics_processor.num_flops_since_last_log + num_flops,
+    metrics_processor.record_optimizer_step_flops.side_effect = (
+        lambda num_flops: setattr(
+            metrics_processor,
+            "num_flops_since_last_log",
+            metrics_processor.num_flops_since_last_log + num_flops,
+        )
     )
     engine = SimpleNamespace(
         num_completed_steps=0,
@@ -188,7 +190,7 @@ def test_ft_averages_logged_loss_and_flops_by_active_replica_count(monkeypatch):
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
     assert trainer.metrics_processor.log.call_args.kwargs["num_flops"] == 130.0
-    trainer.metrics_processor.record_step_flops.assert_called_once_with(30)
+    trainer.metrics_processor.record_optimizer_step_flops.assert_called_once_with(30)
     mean_flops.assert_called_once_with(
         130,
         device=torch.device("cpu"),

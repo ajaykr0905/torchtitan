@@ -59,8 +59,8 @@ def test_training_log_reports_and_resets_accumulated_flops(
 ) -> None:
     processor = _processor(monkeypatch)
     processor.ntokens_since_last_log = 20
-    processor.record_step_flops(1500)
-    processor.record_step_flops(2500)
+    processor.record_optimizer_step_flops(1500)
+    processor.record_optimizer_step_flops(2500)
     processor.data_loading_times.append(0.25)
     processor.step_last_log = 0
     processor.time_last_log = 8.0
@@ -90,7 +90,7 @@ def test_validation_log_resets_accumulated_flops(
 ) -> None:
     processor = _processor(monkeypatch)
     processor.ntokens_since_last_log = 20
-    processor.record_step_flops(4000)
+    processor.record_optimizer_step_flops(4000)
     processor.data_loading_times.append(0.25)
     processor.step_last_log = 0
     processor.time_last_log = 8.0

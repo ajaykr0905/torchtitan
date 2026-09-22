@@ -18,10 +18,7 @@ from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    build_input_token_flops_estimator,
-)
+from torchtitan.models.utils import active_parameter_flops_per_unit
 from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 
@@ -202,7 +199,7 @@ class DeepSeekV4Model(Decoder):
         def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
             """Estimate DeepSeek V4 training FLOPs from the final model config."""
             deepseek_v4_model = cast(DeepSeekV4Model, model)
-            param_flops_per_token = active_parameter_flops_per_token(deepseek_v4_model)
+            param_flops_per_token = active_parameter_flops_per_unit(deepseek_v4_model)
 
             attention_flops_per_token = sum(
                 layer.attention.flops_per_token(seq_len)
@@ -235,9 +232,8 @@ class DeepSeekV4Model(Decoder):
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
-            return build_input_token_flops_estimator(
-                self._flops_per_token(model, seq_len)
-            )
+            flops_per_token = self._flops_per_token(model, seq_len)
+            return lambda batch: flops_per_token * batch["input"].numel()
 
     def __init__(self, config: Config):
         super().__init__(config)

@@ -78,8 +78,8 @@ def estimate_flops(batch: Mapping[str, Any]) -> int:
   instead of silently guessing a substitute.
 
 Every trainer calls `TrainingEngine.estimate_flops(raw_batch)`. Fixed-shape
-text models should return `build_input_token_flops_estimator(flops_per_token)`, which
-scales the cached estimate by `batch["input"].numel()`. Other workloads should
+decoder models should multiply their cached per-token estimate by
+`batch["input"].numel()`. Other workloads should
 use the raw CPU field that actually determines their work rather than fabricate
 an `input` dependency.
 
@@ -87,7 +87,8 @@ Decoder model configs compose `flops_per_token()` directly from the attention
 config owned by each block. This does not require a shared transformer-block base
 class.
 
-`active_parameter_flops_per_token()` provides the conventional `6P` component.
+`get_parameter_counts()` centralizes total and active parameter counting, and
+`active_parameter_flops_per_unit()` derives the conventional `6P` component.
 It weights routed-expert parameters by the expected active fraction
 `top_k / num_experts`; this is an expected-use estimate, not an observation of
 the router's choices for that batch. A model may instead consume compact CPU

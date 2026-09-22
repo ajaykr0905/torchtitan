@@ -124,12 +124,14 @@ def test_graph_trainer_estimates_raw_batches_outside_trace_and_replay(
         should_log=MagicMock(return_value=False),
         log=MagicMock(),
         num_flops_since_last_log=0,
-        record_step_flops=MagicMock(),
+        record_optimizer_step_flops=MagicMock(),
     )
-    metrics_processor.record_step_flops.side_effect = lambda num_flops: setattr(
-        metrics_processor,
-        "num_flops_since_last_log",
-        metrics_processor.num_flops_since_last_log + num_flops,
+    metrics_processor.record_optimizer_step_flops.side_effect = (
+        lambda num_flops: setattr(
+            metrics_processor,
+            "num_flops_since_last_log",
+            metrics_processor.num_flops_since_last_log + num_flops,
+        )
     )
     trainer = cast(GraphTrainer, object.__new__(GraphTrainer))
     trainer.engine = engine
@@ -162,7 +164,7 @@ def test_graph_trainer_estimates_raw_batches_outside_trace_and_replay(
     assert replay_compute_calls == 2
     engine.sdc_replayer.run_fwd_bwd.assert_called_once()
     trace_builder.assert_called_once()
-    metrics_processor.record_step_flops.assert_called_once_with(3)
+    metrics_processor.record_optimizer_step_flops.assert_called_once_with(3)
 
     assert engine._traced_step is not None
     generated_graph = engine._traced_step.gm

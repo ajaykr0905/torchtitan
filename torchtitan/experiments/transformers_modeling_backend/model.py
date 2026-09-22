@@ -31,10 +31,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import (
-    build_input_token_flops_estimator,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel, FlopsEstimator
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -574,9 +571,8 @@ class HFTransformerModel(BaseModel):
             *,
             seq_len: int,
         ) -> FlopsEstimator:
-            return build_input_token_flops_estimator(
-                self._flops_per_token(model, seq_len)
-            )
+            flops_per_token = self._flops_per_token(model, seq_len)
+            return lambda batch: flops_per_token * batch["input"].numel()
 
         def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
             assert isinstance(model, HFTransformerModel)

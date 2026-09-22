@@ -29,7 +29,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionGrid,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import parameter_flops_per_token
+from torchtitan.models.utils import active_parameter_flops_per_unit
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -328,7 +328,7 @@ class Qwen35VisionEncoder(Module):
             encoder: "Qwen35VisionEncoder",
         ) -> VisionFlopsEstimator:
             input_patch_flops = sum(
-                parameter_flops_per_token(module)
+                active_parameter_flops_per_unit(module)
                 for module in (
                     encoder.patch_embed,
                     encoder.layers,
@@ -336,7 +336,7 @@ class Qwen35VisionEncoder(Module):
                 )
             )
             output_token_flops = sum(
-                parameter_flops_per_token(module)
+                active_parameter_flops_per_unit(module)
                 for module in (
                     encoder.merger.linear_fc1,
                     encoder.merger.linear_fc2,

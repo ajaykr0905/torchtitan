@@ -106,8 +106,8 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         trainer.parallel_dims.cp = 1
     if not hasattr(trainer.metrics_processor, "num_flops_since_last_log"):
         trainer.metrics_processor.num_flops_since_last_log = 0
-    if not hasattr(trainer.metrics_processor, "record_step_flops"):
-        trainer.metrics_processor.record_step_flops = MagicMock(
+    if not hasattr(trainer.metrics_processor, "record_optimizer_step_flops"):
+        trainer.metrics_processor.record_optimizer_step_flops = MagicMock(
             side_effect=lambda num_flops: setattr(
                 trainer.metrics_processor,
                 "num_flops_since_last_log",
@@ -168,15 +168,17 @@ def _metric_boundary_trainer(
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=should_log),
         log=MagicMock(),
-        record_step_flops=MagicMock(),
+        record_optimizer_step_flops=MagicMock(),
         ntokens_since_last_log=0,
         num_flops_since_last_log=0,
         data_loading_times=[],
     )
-    metrics_processor.record_step_flops.side_effect = lambda num_flops: setattr(
-        metrics_processor,
-        "num_flops_since_last_log",
-        metrics_processor.num_flops_since_last_log + num_flops,
+    metrics_processor.record_optimizer_step_flops.side_effect = (
+        lambda num_flops: setattr(
+            metrics_processor,
+            "num_flops_since_last_log",
+            metrics_processor.num_flops_since_last_log + num_flops,
+        )
     )
     engine = SimpleNamespace(
         num_completed_steps=0,
@@ -258,7 +260,7 @@ def test_train_step_estimates_each_complete_raw_microbatch_before_preprocessing(
         ("forward_backward", 2),
         ("forward_backward", 3),
     ]
-    trainer.metrics_processor.record_step_flops.assert_called_once_with(10)
+    trainer.metrics_processor.record_optimizer_step_flops.assert_called_once_with(10)
 
 
 def test_logging_reduces_flops_without_changing_existing_metric_reductions(
@@ -299,7 +301,7 @@ def test_logging_reduces_flops_without_changing_existing_metric_reductions(
 
     assert legacy_dist_sum.call_count == 2
     legacy_dist_max.assert_called_once()
-    trainer.metrics_processor.record_step_flops.assert_called_once_with(30)
+    trainer.metrics_processor.record_optimizer_step_flops.assert_called_once_with(30)
     mean_flops_tensor.assert_called_once_with(
         130,
         device=torch.device("cpu"),
@@ -1000,7 +1002,8 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert disabled.num_completed_steps == 1
 
 
-def test_engine_builds_estimator_before_pp_fragmentation() -> None:
+def test_engine_builds_estimator_before_pp_fragmentation(caplog) -> None:
+    caplog.set_level("INFO", logger="torchtitan.training_engine")
     events: list[str] = []
 
     class Model(torch.nn.Linear):
@@ -1048,6 +1051,12 @@ def test_engine_builds_estimator_before_pp_fragmentation() -> None:
         )
 
     assert events == ["estimator", "pipeline"]
+    assert engine.model_param_count == 2
+    assert engine.model_active_param_count == 2
+    assert (
+        "Model SimpleNamespace size: 2 total parameters, 2 active parameters"
+        in caplog.messages
+    )
 
 
 def test_initialize_preserves_phase_order():

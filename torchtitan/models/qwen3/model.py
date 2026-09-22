@@ -13,10 +13,7 @@ import torch.nn as nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    build_input_token_flops_estimator,
-)
+from torchtitan.models.utils import active_parameter_flops_per_unit
 from torchtitan.protocols import FlopsEstimator
 
 from .state_dict_adapter import Qwen3StateDictAdapter
@@ -115,6 +112,6 @@ class Qwen3Model(Decoder):
                 layer.attention.flops_per_token(seq_len) for layer in self.layers
             )
             flops_per_token = (
-                active_parameter_flops_per_token(model) + attention_flops_per_token
+                active_parameter_flops_per_unit(model) + attention_flops_per_token
             )
-            return build_input_token_flops_estimator(flops_per_token)
+            return lambda batch: flops_per_token * batch["input"].numel()

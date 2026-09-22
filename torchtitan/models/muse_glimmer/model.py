@@ -42,15 +42,13 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     build_vision_bank_indices,
     gather_vision_embeds,
+    get_packed_vision_grids,
     MultimodalModel,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    build_input_token_flops_estimator,
-    get_packed_vision_grids,
-    parameter_flops_per_token,
+    active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols import FlopsEstimator
@@ -340,7 +338,7 @@ class MuseGlimmerModel(MultimodalModel):
             seq_len: int,
         ) -> FlopsEstimator:
             muse_model = cast("MuseGlimmerModel", model)
-            decoder_flops_per_token = active_parameter_flops_per_token(
+            decoder_flops_per_token = active_parameter_flops_per_unit(
                 model,
                 excluded_modules=(
                     muse_model.vision_encoder,
@@ -353,16 +351,15 @@ class MuseGlimmerModel(MultimodalModel):
                 layer.attention.flops_per_token(seq_len) for layer in self.layers
             )
             vision_encoder = muse_model.vision_encoder
-            text_estimator = build_input_token_flops_estimator(decoder_flops_per_token)
             if vision_encoder is None:
-                return text_estimator
+                return lambda batch: decoder_flops_per_token * batch["input"].numel()
 
             assert muse_model.vision_adapter is not None
             assert muse_model.vision_projection is not None
             assert muse_model.perception_emb_norm is not None
             assert self.vision_encoder is not None
             vision_output_token_flops = sum(
-                parameter_flops_per_token(module)
+                active_parameter_flops_per_unit(module)
                 for module in (
                     muse_model.vision_adapter,
                     muse_model.vision_projection,
@@ -379,7 +376,9 @@ class MuseGlimmerModel(MultimodalModel):
                     batch,
                     modality_fields=(("pixel_values", "grid_thw"),),
                 )
-                return text_estimator(batch) + vision_estimator(vision_grids)
+                return decoder_flops_per_token * batch[
+                    "input"
+                ].numel() + vision_estimator(vision_grids)
 
             return estimate_flops
 

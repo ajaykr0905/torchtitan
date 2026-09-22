@@ -36,15 +36,14 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    get_packed_vision_grids,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    build_input_token_flops_estimator,
-    get_packed_vision_grids,
+    active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols import FlopsEstimator
@@ -360,7 +359,7 @@ class Qwen35Model(MultimodalModel):
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
             qwen_model = cast("Qwen35Model", model)
-            parameter_flops_per_token = active_parameter_flops_per_token(
+            decoder_parameter_flops_per_token = active_parameter_flops_per_unit(
                 model,
                 excluded_modules=(qwen_model.vision_encoder,),
             )
@@ -372,11 +371,12 @@ class Qwen35Model(MultimodalModel):
                     assert layer.delta_net is not None
                     attention = layer.delta_net
                 attention_flops_per_token += attention.flops_per_token(seq_len)
-            flops_per_token = parameter_flops_per_token + attention_flops_per_token
-            text_estimator = build_input_token_flops_estimator(flops_per_token)
+            flops_per_token = (
+                decoder_parameter_flops_per_token + attention_flops_per_token
+            )
             vision_encoder = qwen_model.vision_encoder
             if vision_encoder is None:
-                return text_estimator
+                return lambda batch: flops_per_token * batch["input"].numel()
 
             assert self.vision_encoder is not None
             vision_estimator = self.vision_encoder.build_vision_flops_estimator(
@@ -391,7 +391,9 @@ class Qwen35Model(MultimodalModel):
                         ("pixel_values_videos", "grid_thw_videos"),
                     ),
                 )
-                return text_estimator(batch) + vision_estimator(vision_grids)
+                return flops_per_token * batch["input"].numel() + vision_estimator(
+                    vision_grids
+                )
 
             return estimate_flops
 

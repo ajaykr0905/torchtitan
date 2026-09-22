@@ -348,7 +348,7 @@ class Trainer(Configurable):
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
 
-        step_num_flops = sum(
+        optimizer_step_flops = sum(
             engine.estimate_flops(microbatch.as_input_dict())
             for microbatch_group in microbatch_groups
             for microbatch in microbatch_group
@@ -397,7 +397,7 @@ class Trainer(Configurable):
         # scheduler advances in engine.optimizer_step().
         lr_metrics = engine.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optimizer_step()
-        self.metrics_processor.record_step_flops(step_num_flops)
+        self.metrics_processor.record_optimizer_step_flops(optimizer_step_flops)
 
         # log metrics
         if not should_log:

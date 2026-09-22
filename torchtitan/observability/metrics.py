@@ -397,7 +397,7 @@ class MetricsProcessor(Configurable):
         self.optimizers = None
         self.model_parts = None
 
-    def record_step_flops(self, num_flops: int) -> None:
+    def record_optimizer_step_flops(self, num_flops: int) -> None:
         if num_flops < 0:
             raise ValueError("num_flops must be non-negative")
 

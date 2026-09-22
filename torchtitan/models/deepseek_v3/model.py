@@ -22,8 +22,7 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    build_input_token_flops_estimator,
+    active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols import FlopsEstimator
@@ -239,7 +238,7 @@ class DeepSeekV3Model(MTPDecoder):
             )
 
         def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
-            param_flops_per_token = active_parameter_flops_per_token(
+            param_flops_per_token = active_parameter_flops_per_unit(
                 model,
                 excluded_modules=self._flops_excluded_modules(model),
             )
@@ -276,9 +275,8 @@ class DeepSeekV3Model(MTPDecoder):
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
-            return build_input_token_flops_estimator(
-                self._flops_per_token(model, seq_len)
-            )
+            flops_per_token = self._flops_per_token(model, seq_len)
+            return lambda batch: flops_per_token * batch["input"].numel()
 
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:

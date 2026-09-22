@@ -46,7 +46,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionGrid,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import parameter_flops_per_token
+from torchtitan.models.utils import active_parameter_flops_per_unit
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -249,7 +249,7 @@ class MuseGlimmerVisionEncoder(Module):
             output_token_flops: int = 0,
         ) -> VisionFlopsEstimator:
             input_patch_flops = sum(
-                parameter_flops_per_token(module)
+                active_parameter_flops_per_unit(module)
                 for module in (
                     encoder.conv1_linear,
                     encoder.ln_pre,

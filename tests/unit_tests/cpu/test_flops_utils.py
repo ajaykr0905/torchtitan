@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
-
 import pytest
 import torch
 from torch import nn
@@ -16,10 +14,10 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.multimodal import get_packed_vision_grids
 from torchtitan.models.utils import (
-    active_parameter_flops_per_token,
-    get_packed_vision_grids,
-    parameter_flops_per_token,
+    active_parameter_flops_per_unit,
+    get_parameter_counts,
 )
 
 
@@ -32,11 +30,11 @@ class _EmbeddingModel(nn.Module):
             self.lm_head.weight = self.tok_embeddings.weight
 
 
-def test_parameter_flops_per_token_counts_dense_module_parameters() -> None:
+def test_active_parameter_flops_per_unit_counts_dense_module_parameters() -> None:
     with torch.device("meta"):
         module = nn.Linear(3, 2)
 
-    assert parameter_flops_per_token(module) == 48
+    assert active_parameter_flops_per_unit(module) == 48
 
 
 @pytest.mark.parametrize("tie_weights", [False, True])
@@ -44,17 +42,14 @@ def test_parameter_flops_exclude_input_embedding(tie_weights: bool) -> None:
     with torch.device("meta"):
         model = _EmbeddingModel(tie_weights=tie_weights)
 
-    assert active_parameter_flops_per_token(model) == 90
+    assert active_parameter_flops_per_unit(model) == 90
 
 
-def test_parameter_flops_log_total_and_active_parameters(caplog) -> None:
-    caplog.set_level(logging.INFO, logger="torchtitan.models.utils")
+def test_get_parameter_counts_returns_total_and_active_parameters() -> None:
     with torch.device("meta"):
         model = _EmbeddingModel(tie_weights=False)
 
-    active_parameter_flops_per_token(model)
-
-    assert "Total parameter count: 30, active parameters: 15" in caplog.messages
+    assert get_parameter_counts(model) == (30, 15)
 
 
 def test_parameter_flops_weight_routed_experts_by_active_ratio() -> None:
@@ -81,7 +76,7 @@ def test_parameter_flops_weight_routed_experts_by_active_ratio() -> None:
             load_balance_coeff=None,
         ).build()
 
-    assert active_parameter_flops_per_token(model) == 252
+    assert active_parameter_flops_per_unit(model) == 252
 
 
 def test_parameter_flops_exclude_module_subtrees() -> None:
@@ -97,8 +92,10 @@ def test_parameter_flops_exclude_module_subtrees() -> None:
     with torch.device("meta"):
         model = Model()
 
+    assert get_parameter_counts(model) == (26, 26)
+
     assert (
-        active_parameter_flops_per_token(
+        active_parameter_flops_per_unit(
             model,
             excluded_modules=(model.excluded,),
         )
