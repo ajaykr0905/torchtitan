@@ -274,6 +274,237 @@ def _assert_tensor_sequence_equal(
 
 
 class GraphPPPartitionTest(unittest.TestCase):
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() >= (10, 0),
+        "MXFP8 requires SM100 or later",
+    )
+    def test_partition_saves_mxfp8_wgrad_inputs_across_mutation(self) -> None:
+        try:
+            from torchtitan.quantization.mxfp8.tensor import _quantize_mxfp8_weight
+        except ImportError as error:
+            raise unittest.SkipTest("TorchAO MXFP8 is unavailable") from error
+
+        torch.manual_seed(0)
+        activation = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+        weight = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+        grad_output = torch.randn_like(activation)
+        with torch.no_grad():
+            weight_operands = _quantize_mxfp8_weight(weight)
+        weight_qdata = weight_operands.weight_qdata_fprop_KN
+        weight_scale = weight_operands.weight_scale_fprop_swizzled
+        base_traced = minimal_fx_tracer(lambda a, b, c, d: [a, b, c, d])(
+            activation,
+            weight_qdata,
+            weight_scale,
+            grad_output,
+        )
+
+        graph = fx.Graph()
+        graph_activation = graph.placeholder("activation")
+        graph_weight_qdata = graph.placeholder("weight_qdata")
+        graph_weight_scale = graph.placeholder("weight_scale")
+        graph_grad_output = graph.placeholder("grad_output")
+
+        quantized_activation = graph.call_function(
+            torch.ops.torchao.mxfp8_quantize.default,
+            args=(graph_activation, True, True, 32, 32, "e4m3", "rceil"),
+        )
+        quantized_activation.meta["val"] = (None, None, None, None)
+        activation_qdata_row = graph.call_function(
+            operator.getitem, args=(quantized_activation, 0)
+        )
+        activation_qdata_col = graph.call_function(
+            operator.getitem, args=(quantized_activation, 1)
+        )
+        activation_scale_row = graph.call_function(
+            operator.getitem, args=(quantized_activation, 2)
+        )
+        activation_scale_col = graph.call_function(
+            operator.getitem, args=(quantized_activation, 3)
+        )
+        activation_scale_row_swizzled = graph.call_function(
+            torch.ops.torchao.triton_mx_block_rearrange.default,
+            args=(activation_scale_row,),
+        )
+        activation_scale_col_swizzled = graph.call_function(
+            torch.ops.torchao.triton_mx_block_rearrange.default,
+            args=(activation_scale_col,),
+        )
+        output_buffer = graph.call_function(
+            torch.ops.aten.empty_like.default,
+            args=(graph_activation,),
+        )
+        graph.call_function(
+            torch.ops.aten._scaled_mm_v2.out,
+            args=(
+                activation_qdata_row,
+                graph_weight_qdata,
+                [activation_scale_row_swizzled],
+                [3],
+                [1],
+                [graph_weight_scale],
+                [3],
+                [1],
+                None,
+                torch.bfloat16,
+                [],
+                False,
+            ),
+            kwargs={"out": output_buffer},
+        )
+        graph.call_function(
+            torch.ops.aten.add_.Tensor,
+            args=(graph_activation, 256.0),
+        )
+        fwd_output = graph.call_function(
+            torch.ops.aten.cos.default,
+            args=(output_buffer,),
+        )
+
+        quantized_grad_output = graph.call_function(
+            torch.ops.torchao.mxfp8_quantize.default,
+            args=(graph_grad_output, False, True, 32, 32, "e4m3", "rceil"),
+        )
+        grad_output_qdata_col = graph.call_function(
+            operator.getitem, args=(quantized_grad_output, 1)
+        )
+        grad_output_scale_col = graph.call_function(
+            operator.getitem, args=(quantized_grad_output, 3)
+        )
+        grad_output_scale_col_swizzled = graph.call_function(
+            torch.ops.torchao.triton_mx_block_rearrange.default,
+            args=(grad_output_scale_col,),
+        )
+        grad_output_qdata_col_t = graph.call_function(
+            torch.ops.aten.t.default,
+            args=(grad_output_qdata_col,),
+        )
+        wgrad = graph.call_function(
+            torch.ops.aten._scaled_mm_v2.default,
+            args=(
+                grad_output_qdata_col_t,
+                activation_qdata_col,
+                [grad_output_scale_col_swizzled],
+                [3],
+                [1],
+                [activation_scale_col_swizzled],
+                [3],
+                [1],
+                None,
+                torch.bfloat16,
+            ),
+        )
+        for node in (
+            quantized_grad_output,
+            grad_output_qdata_col,
+            grad_output_scale_col,
+            grad_output_scale_col_swizzled,
+            grad_output_qdata_col_t,
+            wgrad,
+        ):
+            node.meta["autograd_backward"] = True
+        graph.output((fwd_output, wgrad))
+        joint = _make_graph_module(graph)
+        traced = replace(base_traced, gm=joint)
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+            backward_only_input_indices=(3,),
+        )
+
+        inputs = [activation, weight_qdata, weight_scale, grad_output]
+        joint_inputs = [value.clone() for value in inputs]
+        joint_outputs = _boxed_run(joint, joint_inputs)
+        split_inputs = [value.clone() for value in inputs]
+        fw_args = [split_inputs[index] for index in meta.fwd_flat_input_indices]
+        fw_outputs = _boxed_run(fw_module, fw_args)
+        bw_args = _backward_args_from_partition(
+            meta,
+            fw_outputs,
+            (split_inputs[3],),
+        )
+        bw_outputs = _boxed_run(bw_module, bw_args)
+
+        _assert_tensor_sequence_equal(self, fw_outputs[:1], joint_outputs[:1])
+        torch.testing.assert_close(
+            bw_outputs[0],
+            joint_outputs[1],
+            rtol=0,
+            atol=0,
+        )
+        self.assertIn(activation_qdata_col.name, meta.saved_for_backward_names)
+        self.assertIn(activation_scale_col.name, meta.saved_for_backward_names)
+        (backward_quantizer,) = bw_module.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.torchao.mxfp8_quantize.default,
+        )
+        self.assertEqual(backward_quantizer.args[0].name, graph_grad_output.name)
+
+    def test_partition_saves_dependency_before_input_mutation(self) -> None:
+        x = torch.randn(2, 4)
+        weight = torch.randn(2, 4)
+        base_traced = minimal_fx_tracer(lambda a, b: [a, b])(x, weight)
+
+        graph = fx.Graph()
+        graph_x = graph.placeholder("x")
+        graph_weight = graph.placeholder("weight")
+        prepared_weight = graph.call_function(
+            torch.ops.aten.sin.default,
+            args=(graph_weight,),
+        )
+        output_buffer = graph.call_function(
+            torch.ops.aten.empty_like.default,
+            args=(graph_x,),
+        )
+        graph.call_function(
+            torch.ops.aten.add.out,
+            args=(graph_x, prepared_weight),
+            kwargs={"out": output_buffer},
+        )
+        graph.call_function(
+            torch.ops.aten.add_.Tensor,
+            args=(graph_weight, 256.0),
+        )
+        fwd_output = graph.call_function(
+            torch.ops.aten.cos.default,
+            args=(output_buffer,),
+        )
+        bwd_output = graph.call_function(
+            torch.ops.aten.mul.Tensor,
+            args=(prepared_weight, graph_x),
+        )
+        bwd_output.meta["autograd_backward"] = True
+        graph.output((fwd_output, bwd_output))
+        joint = _make_graph_module(graph)
+        traced = replace(base_traced, gm=joint)
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        joint_inputs = [x.clone(), weight.clone()]
+        joint_outputs = _boxed_run(joint, joint_inputs)
+        split_inputs = [x.clone(), weight.clone()]
+        fw_args = [split_inputs[index] for index in meta.fwd_flat_input_indices]
+        fw_outputs = _boxed_run(fw_module, fw_args)
+        bw_args = _backward_args_from_partition(meta, fw_outputs, ())
+        bw_outputs = _boxed_run(bw_module, bw_args)
+
+        _assert_tensor_sequence_equal(self, fw_outputs[:1], joint_outputs[:1])
+        _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
+        self.assertIn(prepared_weight.name, meta.saved_for_backward_names)
+        self.assertEqual(
+            len(
+                bw_module.graph.find_nodes(
+                    op="call_function",
+                    target=torch.ops.aten.sin.default,
+                )
+            ),
+            0,
+        )
+
     def test_partition_keeps_only_same_phase_effects(self) -> None:
         x = torch.randn(2, 4)
         fwd_state = torch.zeros_like(x)
