@@ -106,20 +106,20 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def _flops_excluded_modules(
-            self, model: nn.Module
-        ) -> tuple[nn.Module | None, ...]:
-            kimi_model = cast("KimiK25Model", model)
-            return (kimi_model.vision_encoder,)
-
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
-            decoder_estimator = DeepSeekV3Model.Config.build_flops_estimator(
-                self, model, seq_len=seq_len
-            )
             kimi_model = cast("KimiK25Model", model)
             vision_encoder = kimi_model.vision_encoder
+            decoder_flops_per_token = self._flops_per_token(
+                model,
+                seq_len,
+                excluded_modules=(vision_encoder,),
+            )
+
+            def decoder_estimator(batch: Mapping[str, Any]) -> int:
+                return decoder_flops_per_token * batch["input"].numel()
+
             if vision_encoder is None:
                 return decoder_estimator
 

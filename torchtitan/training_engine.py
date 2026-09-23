@@ -49,7 +49,6 @@ from torchtitan.distributed.cuda_graph import (
     wrap_with_cuda_graph,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.utils import get_parameter_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -304,9 +303,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             if adapter_cls is not None
             else None
         )
-        (self.model_param_count, self.model_active_param_count) = get_parameter_counts(
-            model
-        )
+        (
+            self.model_param_count,
+            self.model_active_param_count,
+        ) = self.model_config.get_parameter_counts(model)
         self.flops_estimator = self.model_config.build_flops_estimator(
             model,
             seq_len=self.config.training.max_context_length,
@@ -718,7 +718,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     def estimate_flops(self, batch: Mapping[str, Any]) -> int:
         """Estimate logical model FLOPs for one raw CPU batch."""
-        return self.flops_estimator(batch)
+        num_flops = self.flops_estimator(batch)
+        if num_flops < 0:
+            raise ValueError("num_flops must be non-negative")
+        return num_flops
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.num_completed_steps, "ntokens_seen": self.ntokens_seen}

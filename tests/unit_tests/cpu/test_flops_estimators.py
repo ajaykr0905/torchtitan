@@ -16,6 +16,7 @@ from torchtitan.experiments.transformers_modeling_backend.config_registry import
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_registry
+from torchtitan.models.flops import get_parameter_counts
 from torchtitan.models.flux.config_registry import flux_debugmodel
 from torchtitan.models.flux.flux_datasets import FluxTrainingMicrobatch
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_registry
@@ -219,3 +220,36 @@ def test_transformers_backend_estimator_preserves_flops(
     estimator = model_config.build_flops_estimator(model, seq_len=16)
 
     assert estimator({"input": torch.zeros(1, 16)}) == expected_flops
+
+
+def test_transformers_backend_parameter_counts_weight_preparallel_moe() -> None:
+    trainer_config = transformers_modeling_backend_debugmodel_moe(seq_len=16)
+    model_config = copy.deepcopy(trainer_config.model)
+    model_config.update_from_config(config=trainer_config)
+    with torch.device("meta"):
+        model = model_config.build()
+
+    total_params = sum(param.numel() for param in model.parameters())
+    expected_active_params = total_params
+    for layer in model.layers.values():
+        moe_config = getattr(layer, "_native_moe_config", None)
+        if moe_config is None:
+            continue
+        expert_params = sum(param.numel() for param in layer.mlp.experts.parameters())
+        expected_active_params -= expert_params
+        expected_active_params += (
+            expert_params * moe_config.router.top_k // moe_config.num_experts
+        )
+
+    assert model_config.get_parameter_counts(model) == (
+        total_params,
+        expected_active_params,
+    )
+
+
+def test_model_config_parameter_counts_default_to_model_structure() -> None:
+    model_config = llama3_registry("debugmodel", seq_len=16)
+    with torch.device("meta"):
+        model = model_config.build()
+
+    assert model_config.get_parameter_counts(model) == get_parameter_counts(model)

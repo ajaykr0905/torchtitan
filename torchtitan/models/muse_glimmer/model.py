@@ -47,7 +47,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.utils import (
+from torchtitan.models.flops import (
     active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )

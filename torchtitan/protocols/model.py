@@ -100,6 +100,12 @@ class BaseModel(Module, ABC):
         ) -> None:
             pass
 
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return total and architecturally active parameter counts."""
+            from torchtitan.models.flops import get_parameter_counts as count_parameters
+
+            return count_parameters(model)
+
         @abstractmethod
         def build_flops_estimator(
             self,

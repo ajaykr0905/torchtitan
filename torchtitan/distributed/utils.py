@@ -10,7 +10,7 @@ import contextlib
 import logging
 import math
 import os
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -101,52 +101,6 @@ def dist_sum_tensor(
     return _dist_reduce_tensor(
         x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
     )
-
-
-def mean_flops_tensor(
-    local_num_flops: int,
-    *,
-    device: torch.device,
-    mesh: DeviceMesh | None,
-    divisor: int,
-    extra_pg: dist.ProcessGroup | None = None,
-) -> torch.Tensor:
-    """Mean FLOPs across process groups without moving the result to the CPU."""
-    local_num_flops_tensor = torch.tensor(
-        local_num_flops,
-        dtype=torch.float64,
-        device=device,
-    )
-    return (
-        dist_sum_tensor(
-            local_num_flops_tensor,
-            mesh=mesh,
-            extra_pg=extra_pg,
-        )
-        / divisor
-    )
-
-
-def materialize_scalar_tensors(
-    values: Sequence[torch.Tensor],
-) -> tuple[float, ...]:
-    """Materialize one-element tensors with one host read per source device."""
-    if not values or any(value.numel() != 1 for value in values):
-        raise ValueError("values must be a non-empty sequence of one-element tensors")
-
-    values_by_device: dict[torch.device, list[tuple[int, torch.Tensor]]] = {}
-    for index, value in enumerate(values):
-        values_by_device.setdefault(value.device, []).append((index, value))
-
-    materialized = [0.0] * len(values)
-    for indexed_values in values_by_device.values():
-        packed_values = torch.stack(
-            [value.reshape(()).to(dtype=torch.float64) for _, value in indexed_values]
-        ).tolist()
-        for (index, _), value in zip(indexed_values, packed_values):
-            materialized[index] = value
-
-    return tuple(materialized)
 
 
 def dist_mean(

@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
-from torchtitan.models.utils import delta_rule_flops_per_token
+from torchtitan.models.flops import delta_rule_flops_per_token
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:

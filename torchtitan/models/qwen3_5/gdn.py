@@ -22,7 +22,7 @@ from torch import nn
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
-from torchtitan.models.utils import delta_rule_flops_per_token
+from torchtitan.models.flops import delta_rule_flops_per_token
 from torchtitan.protocols.module import Module
 
 

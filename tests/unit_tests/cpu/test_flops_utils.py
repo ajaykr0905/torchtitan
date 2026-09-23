@@ -15,7 +15,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.multimodal import get_packed_vision_grids
-from torchtitan.models.utils import (
+from torchtitan.models.flops import (
     active_parameter_flops_per_unit,
     get_parameter_counts,
 )
@@ -45,11 +45,18 @@ def test_parameter_flops_exclude_input_embedding(tie_weights: bool) -> None:
     assert active_parameter_flops_per_unit(model) == 90
 
 
-def test_get_parameter_counts_returns_total_and_active_parameters() -> None:
+@pytest.mark.parametrize(
+    ("tie_weights", "expected_count"),
+    [(False, 30), (True, 15)],
+)
+def test_get_parameter_counts_includes_embeddings_and_deduplicates_tied_weights(
+    tie_weights: bool,
+    expected_count: int,
+) -> None:
     with torch.device("meta"):
-        model = _EmbeddingModel(tie_weights=False)
+        model = _EmbeddingModel(tie_weights=tie_weights)
 
-    assert get_parameter_counts(model) == (30, 15)
+    assert get_parameter_counts(model) == (expected_count, expected_count)
 
 
 def test_parameter_flops_weight_routed_experts_by_active_ratio() -> None:
@@ -76,6 +83,7 @@ def test_parameter_flops_weight_routed_experts_by_active_ratio() -> None:
             load_balance_coeff=None,
         ).build()
 
+    assert get_parameter_counts(model) == (60, 42)
     assert active_parameter_flops_per_unit(model) == 252
 
 

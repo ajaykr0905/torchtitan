@@ -13,7 +13,7 @@ from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import active_parameter_flops_per_unit
+from torchtitan.models.flops import active_parameter_flops_per_unit
 from torchtitan.protocols import FlopsEstimator
 
 from .state_dict_adapter import Llama3StateDictAdapter

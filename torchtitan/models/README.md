@@ -87,9 +87,16 @@ Decoder model configs compose `flops_per_token()` directly from the attention
 config owned by each block. This does not require a shared transformer-block base
 class.
 
-`get_parameter_counts()` centralizes total and active parameter counting, and
-`active_parameter_flops_per_unit()` derives the conventional `6P` component.
-It weights routed-expert parameters by the expected active fraction
+`BaseModel.Config.get_parameter_counts(model)` provides the default model-structure
+accounting path. Backends with a different pre-parallel module representation may
+override it while preserving the same total/active semantics.
+
+`get_parameter_counts()` reports architectural total and active parameter
+counts. It includes embedding tables and relies on PyTorch's parameter iterator
+to count shared parameters only once. `active_parameter_flops_per_unit()` is a
+separate compute-oriented helper: it excludes embedding lookups and derives the
+conventional `6P` component for matrix-multiplication parameters. Both helpers
+weight routed-expert parameters by the expected active fraction
 `top_k / num_experts`; this is an expected-use estimate, not an observation of
 the router's choices for that batch. A model may instead consume compact CPU
 routing metadata when such metadata is already part of the raw batch and is

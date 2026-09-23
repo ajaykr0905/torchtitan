@@ -104,16 +104,6 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         trainer.parallel_dims.dp_shard = 1
     if not hasattr(trainer.parallel_dims, "cp"):
         trainer.parallel_dims.cp = 1
-    if not hasattr(trainer.metrics_processor, "num_flops_since_last_log"):
-        trainer.metrics_processor.num_flops_since_last_log = 0
-    if not hasattr(trainer.metrics_processor, "record_optimizer_step_flops"):
-        trainer.metrics_processor.record_optimizer_step_flops = MagicMock(
-            side_effect=lambda num_flops: setattr(
-                trainer.metrics_processor,
-                "num_flops_since_last_log",
-                trainer.metrics_processor.num_flops_since_last_log + num_flops,
-            )
-        )
 
     return SimpleNamespace(
         engine=trainer,
@@ -121,6 +111,7 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         gradient_accumulation_steps=trainer.gradient_accumulation_steps,
         num_pp_microbatches=trainer.num_pp_microbatches,
         metrics_processor=trainer.metrics_processor,
+        _local_num_flops_since_last_log=0,
     )
 
 
@@ -168,17 +159,8 @@ def _metric_boundary_trainer(
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=should_log),
         log=MagicMock(),
-        record_optimizer_step_flops=MagicMock(),
         ntokens_since_last_log=0,
-        num_flops_since_last_log=0,
         data_loading_times=[],
-    )
-    metrics_processor.record_optimizer_step_flops.side_effect = (
-        lambda num_flops: setattr(
-            metrics_processor,
-            "num_flops_since_last_log",
-            metrics_processor.num_flops_since_last_log + num_flops,
-        )
     )
     engine = SimpleNamespace(
         num_completed_steps=0,
@@ -209,6 +191,7 @@ def _metric_boundary_trainer(
         gradient_accumulation_steps=gradient_accumulation_steps,
         num_pp_microbatches=num_pp_microbatches,
         metrics_processor=metrics_processor,
+        _local_num_flops_since_last_log=0,
     )
     return trainer, engine
 
@@ -260,7 +243,7 @@ def test_train_step_estimates_each_complete_raw_microbatch_before_preprocessing(
         ("forward_backward", 2),
         ("forward_backward", 3),
     ]
-    trainer.metrics_processor.record_optimizer_step_flops.assert_called_once_with(10)
+    assert trainer._local_num_flops_since_last_log == 10
 
 
 def test_logging_reduces_flops_without_changing_existing_metric_reductions(
@@ -274,7 +257,7 @@ def test_logging_reduces_flops_without_changing_existing_metric_reductions(
         dp_degree=2,
         cp_degree=3,
     )
-    trainer.metrics_processor.num_flops_since_last_log = 100
+    trainer._local_num_flops_since_last_log = 100
     engine.estimate_flops.side_effect = [13, 17]
     engine.ntokens_seen = 23
     loss_mesh = object()
@@ -286,40 +269,29 @@ def test_logging_reduces_flops_without_changing_existing_metric_reductions(
     legacy_dist_max = MagicMock(return_value=2.0)
     monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_sum", legacy_dist_sum)
     monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_max", legacy_dist_max)
-    mean_num_flops_tensor = torch.tensor(130.0)
-    mean_flops_tensor = MagicMock(return_value=mean_num_flops_tensor)
-    materialize_scalar_tensors = MagicMock(return_value=(5.0, 130.0))
-    monkeypatch.setattr(
-        "torchtitan.trainer.dist_utils.mean_flops_tensor", mean_flops_tensor
-    )
-    monkeypatch.setattr(
-        "torchtitan.trainer.dist_utils.materialize_scalar_tensors",
-        materialize_scalar_tensors,
-    )
+    mean_flops = MagicMock(return_value=130.0)
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_mean", mean_flops)
 
     Trainer.train_step(trainer, iter([_batch(), _batch()]))
 
     assert legacy_dist_sum.call_count == 2
     legacy_dist_max.assert_called_once()
-    trainer.metrics_processor.record_optimizer_step_flops.assert_called_once_with(30)
-    mean_flops_tensor.assert_called_once_with(
-        130,
-        device=torch.device("cpu"),
-        mesh=loss_mesh,
-        divisor=6,
+    mean_flops.assert_called_once()
+    local_num_flops_tensor = mean_flops.call_args.args[0]
+    torch.testing.assert_close(
+        local_num_flops_tensor,
+        torch.tensor(130.0, dtype=torch.float64),
     )
-    assert materialize_scalar_tensors.call_args.args[0] == [
-        engine.optimizer_step.return_value,
-        mean_num_flops_tensor,
-    ]
+    assert mean_flops.call_args.kwargs == {"mesh": loss_mesh}
     trainer.metrics_processor.log.assert_called_once_with(
         0,
         1.0,
         2.0,
-        5.0,
+        2.0,
         extra_metrics={"n_tokens_seen": 23.0},
         num_flops=130.0,
     )
+    assert trainer._local_num_flops_since_last_log == 0
 
 
 def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
@@ -1002,6 +974,16 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert disabled.num_completed_steps == 1
 
 
+def test_engine_rejects_negative_flops_estimate() -> None:
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(flops_estimator=lambda batch: -1),
+    )
+
+    with pytest.raises(ValueError, match="num_flops must be non-negative"):
+        TrainingEngine.estimate_flops(engine, {})
+
+
 def test_engine_builds_estimator_before_pp_fragmentation(caplog) -> None:
     caplog.set_level("INFO", logger="torchtitan.training_engine")
     events: list[str] = []
@@ -1015,6 +997,11 @@ def test_engine_builds_estimator_before_pp_fragmentation(caplog) -> None:
         def pipeline(self, **kwargs):
             events.append("pipeline")
             return object(), [self], True, True
+
+    def get_parameter_counts(model):
+        assert next(model.parameters()).is_meta
+        events.append("parameter_counts")
+        return 2, 2
 
     def build_flops_estimator(model, *, seq_len):
         assert next(model.parameters()).is_meta
@@ -1034,6 +1021,7 @@ def test_engine_builds_estimator_before_pp_fragmentation(caplog) -> None:
     )
     engine.model_config = SimpleNamespace(
         build=lambda: Model(1, 1),
+        get_parameter_counts=get_parameter_counts,
         build_flops_estimator=build_flops_estimator,
     )
     engine.device = torch.device("cpu")
@@ -1050,7 +1038,7 @@ def test_engine_builds_estimator_before_pp_fragmentation(caplog) -> None:
             hf_assets_path="",
         )
 
-    assert events == ["estimator", "pipeline"]
+    assert events == ["parameter_counts", "estimator", "pipeline"]
     assert engine.model_param_count == 2
     assert engine.model_active_param_count == 2
     assert (

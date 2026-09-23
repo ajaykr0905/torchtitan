@@ -33,7 +33,7 @@ from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import (
+from torchtitan.models.flops import (
     active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )

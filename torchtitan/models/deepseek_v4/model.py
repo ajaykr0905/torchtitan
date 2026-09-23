@@ -18,7 +18,7 @@ from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-from torchtitan.models.utils import active_parameter_flops_per_unit
+from torchtitan.models.flops import active_parameter_flops_per_unit
 from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 

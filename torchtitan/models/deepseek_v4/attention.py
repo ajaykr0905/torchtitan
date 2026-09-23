@@ -14,7 +14,7 @@ from torchtitan.models.common.attention import BaseAttention, FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import quadratic_attention_flops_per_token
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 
 from .compressor import Compressor, Indexer
 

@@ -144,7 +144,7 @@ def test_forward_backward_accumulates_microbatch_metrics_and_flops() -> None:
         trainer = object.__new__(Trainer)
         global_valid_tokens = torch.tensor(3)
         loss_mesh = object()
-        reduced_num_flops = torch.tensor(7.5, dtype=torch.float64)
+        reduced_num_flops = 7.5
         events: list[tuple[str, int]] = []
         engine = SimpleNamespace(
             device=torch.device("cpu"),
@@ -218,7 +218,7 @@ def test_forward_backward_accumulates_microbatch_metrics_and_flops() -> None:
         other_rank_batch.as_input_dict.side_effect = AssertionError("wrong DP rank")
         training_data = [[other_rank_batch, batch], [other_rank_batch, second_batch]]
         with patch(
-            "torchtitan.rl.trainer.dist_utils.mean_flops_tensor",
+            "torchtitan.rl.trainer.dist_utils.dist_mean",
             return_value=reduced_num_flops,
         ) as mean_flops:
             result = await Trainer.forward_backward_steps(trainer, training_data, 3)
@@ -249,13 +249,14 @@ def test_forward_backward_accumulates_microbatch_metrics_and_flops() -> None:
             ("estimate", 2),
             ("forward_backward", 2),
         ]
-        mean_flops.assert_called_once_with(
-            30,
-            device=torch.device("cpu"),
-            mesh=loss_mesh,
-            divisor=4,
+        mean_flops.assert_called_once()
+        local_num_flops_tensor = mean_flops.call_args.args[0]
+        torch.testing.assert_close(
+            local_num_flops_tensor,
+            torch.tensor(30.0, dtype=torch.float64),
         )
-        assert trainer._optimizer_step_mean_num_flops_tensor is reduced_num_flops
+        assert mean_flops.call_args.kwargs == {"mesh": loss_mesh}
+        assert trainer._optimizer_step_mean_num_flops == reduced_num_flops
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
@@ -300,8 +301,8 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
-        mean_num_flops_tensor = torch.tensor(2000.0, dtype=torch.float64)
-        trainer._optimizer_step_mean_num_flops_tensor = mean_num_flops_tensor
+        mean_num_flops = 2000.0
+        trainer._optimizer_step_mean_num_flops = mean_num_flops
 
         with (
             patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),
@@ -317,10 +318,6 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
                     "mfu_percent": 50.0,
                 },
             ) as compute_performance,
-            patch(
-                "torchtitan.rl.trainer.dist_utils.materialize_scalar_tensors",
-                return_value=(2.0, 2000.0),
-            ) as materialize,
         ):
             result = await Trainer.optimizer_step(trainer)
 
@@ -344,7 +341,6 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
         engine.optimizer_step.assert_called_once_with()
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
-        materialize.assert_called_once_with([grad_norm, mean_num_flops_tensor])
         compute_performance.assert_called_once_with(
             num_tokens=10,
             elapsed_time=2.0,

@@ -46,7 +46,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionGrid,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import active_parameter_flops_per_unit
+from torchtitan.models.flops import active_parameter_flops_per_unit
 from torchtitan.protocols.module import Module, ModuleDict
 
 

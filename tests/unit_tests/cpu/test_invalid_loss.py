@@ -72,7 +72,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.num_pp_microbatches = 1
         loop.metrics_processor = MagicMock()
         loop.metrics_processor.should_log.return_value = should_log
-        loop.metrics_processor.num_flops_since_last_log = 0
+        loop._local_num_flops_since_last_log = 0
 
         trainer.forward_backward_body_fn = MagicMock(
             return_value=torch.tensor(loss_value)

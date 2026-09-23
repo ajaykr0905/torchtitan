@@ -46,17 +46,8 @@ def _ft_metric_boundary_trainer(
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=should_log),
         log=MagicMock(),
-        record_optimizer_step_flops=MagicMock(),
         ntokens_since_last_log=0,
-        num_flops_since_last_log=0,
         data_loading_times=[],
-    )
-    metrics_processor.record_optimizer_step_flops.side_effect = (
-        lambda num_flops: setattr(
-            metrics_processor,
-            "num_flops_since_last_log",
-            metrics_processor.num_flops_since_last_log + num_flops,
-        )
     )
     engine = SimpleNamespace(
         num_completed_steps=0,
@@ -91,6 +82,7 @@ def _ft_metric_boundary_trainer(
         gradient_accumulation_steps=gradient_accumulation_steps,
         num_pp_microbatches=num_pp_microbatches,
         metrics_processor=metrics_processor,
+        _local_num_flops_since_last_log=0,
     )
     return trainer, engine
 
@@ -168,7 +160,7 @@ def test_ft_averages_logged_loss_and_flops_by_active_replica_count(monkeypatch):
         dp_cp_enabled=True,
         loss_sync_pg=ft_pg,
     )
-    trainer.metrics_processor.num_flops_since_last_log = 100
+    trainer._local_num_flops_since_last_log = 100
     engine.estimate_flops.side_effect = [13, 17]
     engine.ntokens_seen = 4
     loss_mesh = object()
@@ -177,11 +169,8 @@ def test_ft_averages_logged_loss_and_flops_by_active_replica_count(monkeypatch):
     # Two active replicas contribute a loss sum of 4.0, despite group_size=23.
     monkeypatch.setattr(ft.dist_utils, "dist_sum", Mock(side_effect=[4.0, 8]))
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
-    mean_num_flops_tensor = torch.tensor(130.0)
-    mean_flops = Mock(return_value=mean_num_flops_tensor)
-    monkeypatch.setattr(ft.dist_utils, "mean_flops_tensor", mean_flops)
-    materialize = Mock(return_value=(5.0, 130.0))
-    monkeypatch.setattr(ft.dist_utils, "materialize_scalar_tensors", materialize)
+    mean_flops = Mock(return_value=130.0)
+    monkeypatch.setattr(ft.dist_utils, "dist_mean", mean_flops)
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
     ft.FaultTolerantTrainer.train_step(trainer, iter([_microbatch(4), _microbatch(4)]))
@@ -190,18 +179,14 @@ def test_ft_averages_logged_loss_and_flops_by_active_replica_count(monkeypatch):
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
     assert trainer.metrics_processor.log.call_args.kwargs["num_flops"] == 130.0
-    trainer.metrics_processor.record_optimizer_step_flops.assert_called_once_with(30)
-    mean_flops.assert_called_once_with(
-        130,
-        device=torch.device("cpu"),
-        mesh=loss_mesh,
-        divisor=2,
-        extra_pg=ft_pg,
+    mean_flops.assert_called_once()
+    local_num_flops_tensor = mean_flops.call_args.args[0]
+    torch.testing.assert_close(
+        local_num_flops_tensor,
+        torch.tensor(130.0, dtype=torch.float64),
     )
-    assert materialize.call_args.args[0] == [
-        engine.optimizer_step.return_value,
-        mean_num_flops_tensor,
-    ]
+    assert mean_flops.call_args.kwargs == {"mesh": loss_mesh, "extra_pg": ft_pg}
+    assert trainer._local_num_flops_since_last_log == 0
 
 
 def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None:

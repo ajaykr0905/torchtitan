@@ -21,9 +21,9 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -39,7 +39,6 @@ from torchtitan.models.flux.utils import (
     pack_latents,
     preprocess_data,
 )
-from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel, FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 
@@ -96,10 +95,10 @@ class FluxModel(BaseModel):
             *,
             seq_len: int,
         ) -> FlopsEstimator:
-            cached_flops_per_token = self._flops_per_token(model, seq_len)
+            flops_per_token = self._flops_per_token(model, seq_len)
 
             def estimate_flops(batch: Mapping[str, Any]) -> int:
-                return batch["labels"].shape[0] * seq_len * cached_flops_per_token
+                return batch["labels"].shape[0] * seq_len * flops_per_token
 
             return estimate_flops
 
@@ -252,7 +251,6 @@ class FluxModel(BaseModel):
             fully_shard,
             MixedPrecisionPolicy,
         )
-
         from torchtitan.distributed.fsdp import (
             disable_fsdp_gradient_division,
             enable_fsdp_symm_mem,

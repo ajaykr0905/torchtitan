@@ -123,15 +123,6 @@ def test_graph_trainer_estimates_raw_batches_outside_trace_and_replay(
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=False),
         log=MagicMock(),
-        num_flops_since_last_log=0,
-        record_optimizer_step_flops=MagicMock(),
-    )
-    metrics_processor.record_optimizer_step_flops.side_effect = (
-        lambda num_flops: setattr(
-            metrics_processor,
-            "num_flops_since_last_log",
-            metrics_processor.num_flops_since_last_log + num_flops,
-        )
     )
     trainer = cast(GraphTrainer, object.__new__(GraphTrainer))
     trainer.engine = engine
@@ -148,6 +139,7 @@ def test_graph_trainer_estimates_raw_batches_outside_trace_and_replay(
     trainer.gradient_accumulation_steps = 2
     trainer.num_pp_microbatches = 1
     trainer.metrics_processor = metrics_processor
+    trainer._local_num_flops_since_last_log = 0
 
     trace_builder = MagicMock(wraps=graph_trainer_module.minimal_fx_tracer)
     monkeypatch.setattr(
@@ -164,7 +156,7 @@ def test_graph_trainer_estimates_raw_batches_outside_trace_and_replay(
     assert replay_compute_calls == 2
     engine.sdc_replayer.run_fwd_bwd.assert_called_once()
     trace_builder.assert_called_once()
-    metrics_processor.record_optimizer_step_flops.assert_called_once_with(3)
+    assert trainer._local_num_flops_since_last_log == 3
 
     assert engine._traced_step is not None
     generated_graph = engine._traced_step.gm

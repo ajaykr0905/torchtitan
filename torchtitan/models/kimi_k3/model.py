@@ -43,11 +43,11 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
-from torchtitan.models.utils import (
+from torchtitan.models.flops import (
     active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import Module
 

@@ -271,13 +271,14 @@ class Trainer(Configurable):
             )
 
         parallel_dims = engine.parallel_dims
-        self._optimizer_step_mean_num_flops_tensor = dist_utils.mean_flops_tensor(
+        local_num_flops_tensor = torch.tensor(
             optimizer_step_flops,
+            dtype=torch.float64,
             device=engine.device,
+        )
+        self._optimizer_step_mean_num_flops = dist_utils.dist_mean(
+            local_num_flops_tensor,
             mesh=parallel_dims.get_optional_mesh("loss"),
-            divisor=(
-                parallel_dims.dp_replicate * parallel_dims.dp_shard * parallel_dims.cp
-            ),
         )
 
         return combine_microbatch_metrics(microbatch_metrics)
@@ -306,9 +307,8 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
 
-        grad_norm_value, mean_num_flops = dist_utils.materialize_scalar_tensors(
-            [grad_norm, self._optimizer_step_mean_num_flops_tensor]
-        )
+        grad_norm_value = float(grad_norm.item())
+        mean_num_flops = self._optimizer_step_mean_num_flops
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.

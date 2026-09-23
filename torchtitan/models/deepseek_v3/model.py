@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
@@ -21,7 +22,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
-from torchtitan.models.utils import (
+from torchtitan.models.flops import (
     active_parameter_flops_per_unit,
     quadratic_attention_flops_per_token,
 )
@@ -237,10 +238,16 @@ class DeepSeekV3Model(MTPDecoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
+        def _flops_per_token(
+            self,
+            model: nn.Module,
+            seq_len: int,
+            *,
+            excluded_modules: Iterable[nn.Module | None] = (),
+        ) -> int:
             param_flops_per_token = active_parameter_flops_per_unit(
                 model,
-                excluded_modules=self._flops_excluded_modules(model),
+                excluded_modules=excluded_modules,
             )
 
             attention_flops_per_token = sum(
@@ -265,12 +272,6 @@ class DeepSeekV3Model(MTPDecoder):
                 + mtp_lm_head_flops_per_token
                 + attention_flops_per_token
             )
-
-        def _flops_excluded_modules(
-            self, model: nn.Module
-        ) -> tuple[nn.Module | None, ...]:
-            del model
-            return ()
 
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int

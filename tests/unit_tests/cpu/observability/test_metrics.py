@@ -54,13 +54,11 @@ def _processor(monkeypatch: pytest.MonkeyPatch) -> MetricsProcessor:
     return processor
 
 
-def test_training_log_reports_and_resets_accumulated_flops(
+def test_training_log_reports_passed_flops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     processor = _processor(monkeypatch)
     processor.ntokens_since_last_log = 20
-    processor.record_optimizer_step_flops(1500)
-    processor.record_optimizer_step_flops(2500)
     processor.data_loading_times.append(0.25)
     processor.step_last_log = 0
     processor.time_last_log = 8.0
@@ -77,7 +75,6 @@ def test_training_log_reports_and_resets_accumulated_flops(
         num_flops=4000,
     )
 
-    assert processor.num_flops_since_last_log == 0
     logger = processor.logger
     assert isinstance(logger, _CapturingLogger)
     assert logger.metrics is not None
@@ -85,12 +82,11 @@ def test_training_log_reports_and_resets_accumulated_flops(
     assert logger.metrics["mfu(%)"] == 100.0
 
 
-def test_validation_log_resets_accumulated_flops(
+def test_validation_log_resets_training_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     processor = _processor(monkeypatch)
     processor.ntokens_since_last_log = 20
-    processor.record_optimizer_step_flops(4000)
     processor.data_loading_times.append(0.25)
     processor.step_last_log = 0
     processor.time_last_log = 8.0
@@ -102,4 +98,3 @@ def test_validation_log_resets_accumulated_flops(
     processor.log_validation(loss=1.0, step=1)
 
     assert processor.ntokens_since_last_log == 0
-    assert processor.num_flops_since_last_log == 0

@@ -164,6 +164,7 @@ class FaultTolerantTrainer(Configurable):
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     engine: FaultTolerantTrainingEngine
+    _local_num_flops_since_last_log: int
 
     @record
     def __init__(self, config: Config):
@@ -227,6 +228,7 @@ class FaultTolerantTrainer(Configurable):
             config_dict=config.to_dict(),
         )
         color = self.metrics_processor.color
+        self._local_num_flops_since_last_log = 0
 
         self.num_pp_microbatches = num_pp_microbatches
         num_tokens_per_dp_rank = (
@@ -393,7 +395,7 @@ class FaultTolerantTrainer(Configurable):
                     accumulated_loss.add_(detached_loss)
 
         grad_norm = engine.optimizer_step()
-        self.metrics_processor.record_optimizer_step_flops(optimizer_step_flops)
+        self._local_num_flops_since_last_log += optimizer_step_flops
 
         # log metrics
         if not should_log:
@@ -435,21 +437,17 @@ class FaultTolerantTrainer(Configurable):
             global_avg_loss = global_max_loss = accumulated_loss.item()
             global_ntokens_seen = engine.ntokens_seen
 
-        mean_num_flops_tensor = dist_utils.mean_flops_tensor(
-            self.metrics_processor.num_flops_since_last_log,
+        local_num_flops_tensor = torch.tensor(
+            self._local_num_flops_since_last_log,
+            dtype=torch.float64,
             device=engine.device,
+        )
+        mean_num_flops = dist_utils.dist_mean(
+            local_num_flops_tensor,
             mesh=loss_mesh,
-            divisor=(
-                parallel_dims.dp_replicate
-                * parallel_dims.dp_shard
-                * parallel_dims.cp
-                * live_ft_size
-            ),
             extra_pg=ft_pg,
         )
-        grad_norm, mean_num_flops = dist_utils.materialize_scalar_tensors(
-            [grad_norm, mean_num_flops_tensor]
-        )
+        grad_norm = float(grad_norm.item())
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -464,6 +462,7 @@ class FaultTolerantTrainer(Configurable):
             extra_metrics=extra_metrics,
             num_flops=mean_num_flops,
         )
+        self._local_num_flops_since_last_log = 0
 
     @record
     def train(self):
@@ -519,6 +518,7 @@ class FaultTolerantTrainer(Configurable):
                     self.validator.validate(
                         engine.model_parts, engine.num_completed_steps
                     )
+                    self._local_num_flops_since_last_log = 0
 
                 # signal the profiler that the next profiling step has started
                 profiler.step()

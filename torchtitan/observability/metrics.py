@@ -342,7 +342,6 @@ class MetricsProcessor(Configurable):
 
     gpu_peak_flops: float
     ntokens_since_last_log: int
-    num_flops_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
     step_last_log: int | None
@@ -385,7 +384,6 @@ class MetricsProcessor(Configurable):
             self.device_memory_monitor.device_name
         )
         self.ntokens_since_last_log = 0
-        self.num_flops_since_last_log = 0
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.step_last_log = None
@@ -396,12 +394,6 @@ class MetricsProcessor(Configurable):
         # These variables have to be set later as they depend on other components or model.
         self.optimizers = None
         self.model_parts = None
-
-    def record_optimizer_step_flops(self, num_flops: int) -> None:
-        if num_flops < 0:
-            raise ValueError("num_flops must be non-negative")
-
-        self.num_flops_since_last_log += num_flops
 
     def should_log(self, step: int) -> bool:
         if self.step_last_log is None:
@@ -577,7 +569,6 @@ class MetricsProcessor(Configurable):
         )
 
         self.ntokens_since_last_log = 0
-        self.num_flops_since_last_log = 0
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()
         self.step_last_log = step
@@ -619,7 +610,6 @@ class MetricsProcessor(Configurable):
         )
 
         self.ntokens_since_last_log = 0
-        self.num_flops_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.step_last_log = step
         self.device_memory_monitor.reset_peak_stats()
