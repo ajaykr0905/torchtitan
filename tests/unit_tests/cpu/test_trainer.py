@@ -418,9 +418,11 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             example_inputs,
             *,
             num_warmup_iterations,
+            gradient_state=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
+            assert gradient_state is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -464,9 +466,11 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             example_inputs,
             *,
             num_warmup_iterations,
+            gradient_state=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
+            assert gradient_state is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -496,6 +500,7 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
 
 
 def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
+    model = torch.nn.Linear(2, 2)
     eager_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
     )
@@ -514,6 +519,7 @@ def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
                 sdc_replayer=None,
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False, fsdp_enabled=True),
+            model_parts=[model],
             _forward_backward_body=eager_forward_backward,
         ),
     )
@@ -555,6 +561,8 @@ def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
     assert isinstance(wrapped_forward_backward, partial)
     assert wrapped_forward_backward.func is eager_forward_backward
     assert wrapped_forward_backward.keywords == {"defer_fsdp_gradient_reduction": True}
+    gradient_state = wrap.call_args.kwargs["gradient_state"]
+    assert gradient_state.parameters == tuple(model.parameters())
     assert run_eager.call_count == 5
     assert eager_forward_backward.call_count == 5
     assert all(
@@ -878,6 +886,7 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
                     fsdp_reshard_after_forward="never",
                 ),
             ),
+            model_parts=[],
             _forward_backward_body=MagicMock(),
         ),
     )

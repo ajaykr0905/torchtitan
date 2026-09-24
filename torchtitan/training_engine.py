@@ -47,6 +47,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
+    CUDAGraphGradientState,
     run_eager_on_cuda_graph_stream,
     wrap_with_cuda_graph,
 )
@@ -466,8 +467,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
             return
 
+        gradient_state = CUDAGraphGradientState(
+            parameter
+            for model_part in self.model_parts
+            for parameter in model_part.parameters()
+        )
         cuda_graph_forward_backward_fn = wrap_with_cuda_graph(
-            eager_forward_backward_fn
+            eager_forward_backward_fn,
+            gradient_state=gradient_state,
         )
 
         def run_with_cuda_graph(
@@ -510,7 +517,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
         self.gc_handler.run(self.num_completed_steps + 1)
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(
                 global_valid_tokens,
