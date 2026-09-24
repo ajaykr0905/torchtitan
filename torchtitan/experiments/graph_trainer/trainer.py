@@ -7,12 +7,11 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import torch
 import torch.nn as nn
-
-from torchtitan.components.data.types import TrainingMicrobatch
 
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown, CUDAGraphWrapper
@@ -50,7 +49,6 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_INPUT_PREPARERS,
 )
 from torchtitan.experiments.graph_trainer.runner import GraphRunner
-from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -165,7 +163,29 @@ class GraphTrainingEngine(TrainingEngine):
         self._pinned_pool_ctx = None
 
     def _initialize_forward_backward(self) -> None:
-        super()._initialize_forward_backward()
+        if self.config.parallelism.fsdp_defer_gradient_reduction:
+            raise ValueError(
+                "GraphTrainer does not support fsdp_defer_gradient_reduction."
+            )
+
+        sdc_config = self.config.sdc_replayer
+        self.sdc_replayer = None
+        if sdc_config is not None:
+            self.sdc_replayer = sdc_config.build(
+                modules=self.model_parts,
+                device=self.device,
+            )
+
+        self._num_optimizer_steps_since_cuda_graph_init = 0
+        if self.parallel_dims.pp_enabled:
+            self._pp_loss_sentinel_on_non_last_stage = torch.full(
+                (1,), -1.0, device=self.device
+            )
+        self._run_forward_backward = partial(
+            self._forward_backward_body,
+            defer_fsdp_gradient_reduction=False,
+        )
+
         _maybe_apply_numa_binding(self.device.index, self.device.type)
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
@@ -181,76 +201,38 @@ class GraphTrainingEngine(TrainingEngine):
         else:
             self._pinned_pool_ctx = None
 
-    def forward_backward_microbatch(
+    def _non_pp_forward_backward_microbatch(
         self,
         *,
-        microbatch_group: list[TrainingMicrobatch],
-        global_valid_tokens: torch.Tensor,
-        accumulation_index: int = 0,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        model_kwargs: dict[str, Any],
+        loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
-            return super().forward_backward_microbatch(
-                microbatch_group=microbatch_group,
-                global_valid_tokens=global_valid_tokens,
-                accumulation_index=accumulation_index,
+        if self.config.compile.mode != "aot_fx_trace":
+            return super()._non_pp_forward_backward_microbatch(
+                inputs=inputs,
+                labels=labels,
+                model_kwargs=model_kwargs,
+                loss_kwargs=loss_kwargs,
             )
 
-        if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
+        if set(loss_kwargs) != {"global_valid_tokens"}:
             raise ValueError(
                 "GraphTrainingEngine does not support per-microbatch loss arguments."
             )
 
-        # This intentionally duplicates the core engine's per-microbatch
-        # execution envelope instead of adding graph-specific hooks to core.
-        if accumulation_index == 0:
-            self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
-
-        if self.parallel_dims.dp_replicate_enabled and (
-            self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
-        ):
-            is_last = accumulation_index == self.num_accumulation_steps - 1
-            for part in self.model_parts:
-                part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
-
-        def compute_forward_backward() -> torch.Tensor:
-            assert len(microbatch_group) == 1
-            microbatch = microbatch_group[0]
-            assert len(self.model_parts) == 1
-            model = self.model_parts[0]
-
-            with sl.log_trace_span("preprocess_inputs"):
-                inputs, labels, extra_kwargs = model.preprocess_inputs(
-                    microbatch.to_input_dict(self.device, non_blocking=True),
-                    parallel_dims=self.parallel_dims,
-                    parallelism=self.config.parallelism,
-                )
-                # MTP returns one labels tensor per prediction; index 0 contains
-                # the complete main-model labels used for token accounting.
-                self.ntokens_seen += (
-                    self.config.training.num_tokens_per_microbatch_per_dp_rank
-                    // self.parallel_dims.cp
-                )
-            # remove_duplicate=False to preserve duplicate parameter entries
-            # from weight tying (e.g. shared embedding/output weights).
-            params = self._get_trainable_parameters(model)
-            return self._make_fx_forward_backward_microbatch(
-                model,
-                inputs,
-                labels,
-                global_valid_tokens,
-                params,
-                extra_kwargs,
-            )
-
-        if self.sdc_replayer is not None and accumulation_index == 0:
-            loss = self.sdc_replayer.run_fwd_bwd(
-                compute_forward_backward, step=self.num_completed_steps + 1
-            )
-        else:
-            loss = compute_forward_backward()
-        detached_loss = loss.detach()
-        self.loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
-        return detached_loss
+        assert len(self.model_parts) == 1
+        model = self.model_parts[0]
+        params = self._get_trainable_parameters(model)
+        return self._make_fx_forward_backward_microbatch(
+            model,
+            inputs,
+            labels,
+            loss_kwargs["global_valid_tokens"],
+            params,
+            model_kwargs,
+        )
 
     def _load_precompiled_fx_trace(
         self,
