@@ -9,12 +9,9 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.flops import active_parameter_flops_per_unit
-from torchtitan.protocols import FlopsEstimator
 
 from .state_dict_adapter import Qwen3StateDictAdapter
 
@@ -104,14 +101,3 @@ class Qwen3Model(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-
-        def build_flops_estimator(
-            self, model: nn.Module, *, seq_len: int
-        ) -> FlopsEstimator:
-            attention_flops_per_token = sum(
-                layer.attention.flops_per_token(seq_len) for layer in self.layers
-            )
-            flops_per_token = (
-                active_parameter_flops_per_unit(model) + attention_flops_per_token
-            )
-            return lambda batch: flops_per_token * batch["input"].numel()

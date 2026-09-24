@@ -338,17 +338,15 @@ class MuseGlimmerModel(MultimodalModel):
             seq_len: int,
         ) -> FlopsEstimator:
             muse_model = cast("MuseGlimmerModel", model)
-            decoder_flops_per_token = active_parameter_flops_per_unit(
+            decoder_flops_per_token = self._decoder_flops_per_token(
                 model,
+                seq_len,
                 excluded_modules=(
                     muse_model.vision_encoder,
                     muse_model.vision_adapter,
                     muse_model.vision_projection,
                     muse_model.perception_emb_norm,
                 ),
-            )
-            decoder_flops_per_token += sum(
-                layer.attention.flops_per_token(seq_len) for layer in self.layers
             )
             vision_encoder = muse_model.vision_encoder
             if vision_encoder is None:

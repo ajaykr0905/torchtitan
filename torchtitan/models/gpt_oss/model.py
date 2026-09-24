@@ -33,11 +33,7 @@ from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.flops import (
-    active_parameter_flops_per_unit,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols import FlopsEstimator
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.protocols.module import Module
 
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -237,17 +233,6 @@ class GptOssModel(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-
-        def build_flops_estimator(
-            self, model: nn.Module, *, seq_len: int
-        ) -> FlopsEstimator:
-            attention_flops_per_token = sum(
-                layer.attention.flops_per_token(seq_len) for layer in self.layers
-            )
-            flops_per_token = (
-                active_parameter_flops_per_unit(model) + attention_flops_per_token
-            )
-            return lambda batch: flops_per_token * batch["input"].numel()
 
     def __init__(self, config: Config):
         super().__init__(config)

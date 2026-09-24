@@ -43,10 +43,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.flops import (
-    active_parameter_flops_per_unit,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import Module
@@ -344,28 +341,25 @@ class KimiK3Model(MultimodalModel):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
+        def _layer_flops_per_token(self, layer_config: Any, seq_len: int) -> int:
+            if layer_config.attention is not None:
+                return layer_config.attention.flops_per_token(seq_len)
+
+            assert layer_config.delta_attention is not None
+            return layer_config.delta_attention.flops_per_token(seq_len)
+
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
             kimi_model = cast("KimiK3Model", model)
-            decoder_parameter_flops_per_token = active_parameter_flops_per_unit(
+            decoder_flops_per_token = self._decoder_flops_per_token(
                 model,
+                seq_len,
                 excluded_modules=(kimi_model.vision_encoder,),
-            )
-            attention_flops_per_token = 0
-            for layer in self.layers:
-                if layer.attention is not None:
-                    attention = layer.attention
-                else:
-                    assert layer.delta_attention is not None
-                    attention = layer.delta_attention
-                attention_flops_per_token += attention.flops_per_token(seq_len)
-            flops_per_token = (
-                decoder_parameter_flops_per_token + attention_flops_per_token
             )
             vision_encoder = kimi_model.vision_encoder
             if vision_encoder is None:
-                return lambda batch: flops_per_token * batch["input"].numel()
+                return lambda batch: decoder_flops_per_token * batch["input"].numel()
 
             assert self.vision_encoder is not None
             vision_estimator = self.vision_encoder.build_vision_flops_estimator(
@@ -377,9 +371,9 @@ class KimiK3Model(MultimodalModel):
                     batch,
                     modality_fields=(("pixel_values", "grid_thw"),),
                 )
-                return flops_per_token * batch["input"].numel() + vision_estimator(
-                    vision_grids
-                )
+                return decoder_flops_per_token * batch[
+                    "input"
+                ].numel() + vision_estimator(vision_grids)
 
             return estimate_flops
 

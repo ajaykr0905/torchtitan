@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import cast, TYPE_CHECKING
 
@@ -18,8 +19,6 @@ from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-from torchtitan.models.flops import active_parameter_flops_per_unit
-from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
@@ -196,15 +195,22 @@ class DeepSeekV4Model(Decoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
+        def _decoder_flops_per_token(
+            self,
+            model: nn.Module,
+            seq_len: int,
+            *,
+            excluded_modules: Iterable[nn.Module | None] = (),
+        ) -> int:
             """Estimate DeepSeek V4 training FLOPs from the final model config."""
             deepseek_v4_model = cast(DeepSeekV4Model, model)
-            param_flops_per_token = active_parameter_flops_per_unit(deepseek_v4_model)
+            decoder_flops_per_token = Decoder.Config._decoder_flops_per_token(
+                self, model, seq_len, excluded_modules=excluded_modules
+            )
 
-            attention_flops_per_token = sum(
-                layer.attention.flops_per_token(seq_len)
-                for layers in (self.layers, self.mtp_layers or ())
-                for layer in layers
+            mtp_attention_flops_per_token = sum(
+                self._layer_flops_per_token(layer_config, seq_len)
+                for layer_config in self.mtp_layers or ()
             )
 
             mtp_lm_head_flops_per_token = (
@@ -223,17 +229,11 @@ class DeepSeekV4Model(Decoder):
             )
 
             return (
-                param_flops_per_token
+                decoder_flops_per_token
                 + mtp_lm_head_flops_per_token
                 + mtp_h_proj_flops_per_token
-                + attention_flops_per_token
+                + mtp_attention_flops_per_token
             )
-
-        def build_flops_estimator(
-            self, model: nn.Module, *, seq_len: int
-        ) -> FlopsEstimator:
-            flops_per_token = self._flops_per_token(model, seq_len)
-            return lambda batch: flops_per_token * batch["input"].numel()
 
     def __init__(self, config: Config):
         super().__init__(config)

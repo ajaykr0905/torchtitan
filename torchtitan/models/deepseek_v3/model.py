@@ -22,11 +22,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
-from torchtitan.models.flops import (
-    active_parameter_flops_per_unit,
-    quadratic_attention_flops_per_token,
-)
-from torchtitan.protocols import FlopsEstimator
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.protocols.module import Module
 
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
@@ -238,22 +234,22 @@ class DeepSeekV3Model(MTPDecoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def _flops_per_token(
+        def _decoder_flops_per_token(
             self,
             model: nn.Module,
             seq_len: int,
             *,
             excluded_modules: Iterable[nn.Module | None] = (),
         ) -> int:
-            param_flops_per_token = active_parameter_flops_per_unit(
+            decoder_flops_per_token = MTPDecoder.Config._decoder_flops_per_token(
+                self,
                 model,
+                seq_len,
                 excluded_modules=excluded_modules,
             )
-
-            attention_flops_per_token = sum(
-                layer.attention.flops_per_token(seq_len)
-                for layers in (self.layers, self.mtp_layers)
-                for layer in layers
+            mtp_attention_flops_per_token = sum(
+                self._layer_flops_per_token(layer_config, seq_len)
+                for layer_config in self.mtp_layers
             )
 
             # The base parameter term counts one lm_head use. MTP applies that
@@ -268,16 +264,10 @@ class DeepSeekV3Model(MTPDecoder):
                 )
 
             return (
-                param_flops_per_token
+                decoder_flops_per_token
                 + mtp_lm_head_flops_per_token
-                + attention_flops_per_token
+                + mtp_attention_flops_per_token
             )
-
-        def build_flops_estimator(
-            self, model: nn.Module, *, seq_len: int
-        ) -> FlopsEstimator:
-            flops_per_token = self._flops_per_token(model, seq_len)
-            return lambda batch: flops_per_token * batch["input"].numel()
 
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:

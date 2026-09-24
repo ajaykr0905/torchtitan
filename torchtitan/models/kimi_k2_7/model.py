@@ -111,17 +111,14 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         ) -> FlopsEstimator:
             kimi_model = cast("KimiK25Model", model)
             vision_encoder = kimi_model.vision_encoder
-            decoder_flops_per_token = self._flops_per_token(
+            decoder_flops_per_token = self._decoder_flops_per_token(
                 model,
                 seq_len,
                 excluded_modules=(vision_encoder,),
             )
 
-            def decoder_estimator(batch: Mapping[str, Any]) -> int:
-                return decoder_flops_per_token * batch["input"].numel()
-
             if vision_encoder is None:
-                return decoder_estimator
+                return lambda batch: decoder_flops_per_token * batch["input"].numel()
 
             assert self.vision_encoder is not None
             vision_estimator = self.vision_encoder.build_vision_flops_estimator(
@@ -136,7 +133,9 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                         ("pixel_values_videos", "grid_thw_videos"),
                     ),
                 )
-                return decoder_estimator(batch) + vision_estimator(vision_grids)
+                return decoder_flops_per_token * batch[
+                    "input"
+                ].numel() + vision_estimator(vision_grids)
 
             return estimate_flops
 
