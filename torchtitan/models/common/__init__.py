@@ -7,6 +7,7 @@
 from .activation import (
     BinaryActivationFn,
     Sigmoid,
+    SiLU,
     SiTUGLU,
     Softmax,
     SqrtSoftplus,
@@ -35,17 +36,8 @@ from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedF
 from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
-from .nn_modules import (
-    Conv1d,
-    Conv2d,
-    GatedRMSNorm,
-    GELU,
-    GroupNorm,
-    Identity,
-    LayerNorm,
-    RMSNorm,
-    SiLU,
-)
+from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
+from .norm import GatedRMSNorm
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
