@@ -32,7 +32,13 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
+from .linear import (
+    CastLinear,
+    GroupedLinear,
+    Linear,
+    PartialBiasRowwiseLinear,
+    RouterGateLinear,
+)
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import (
@@ -69,6 +75,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "GQAttention",
     "GroupNorm",
+    "GroupedLinear",
     "Identity",
     "InnerAttention",
     "LayerNorm",

@@ -24,7 +24,6 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.models.common.moe import (
-    GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
     TokenChoiceTopKRouter,
 )
@@ -80,53 +79,25 @@ class TestMoE(unittest.TestCase):
                 gate=RouterGateLinear.Config(in_features=4, out_features=4),
             )
 
-    def test_grouped_experts_use_configured_activation(self):
+    def test_routed_experts_use_configured_activation(self):
+        """Routed experts build and execute their configured binary activation."""
         activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
-        experts = GroupedExperts.Config(
+        config = make_routed_experts_config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
-            activation_fn=activation_fn,
-        ).build()
+            top_k=1,
+            param_init={},
+            comm_backend="standard",
+        )
+        config.activation_fn = activation_fn
+        experts = config.build()
         gate_RF = torch.randn(3, 8)
         up_RF = torch.randn(3, 8)
 
         expected_RF = activation_fn.build()(gate_RF, up_RF)
         actual_RF = experts.activation_fn(gate_RF, up_RF)
         torch.testing.assert_close(actual_RF, expected_RF)
-
-    def test_grouped_experts_use_fused_gate_up_parameter(self):
-        experts = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-
-        self.assertEqual(
-            {name for name, _ in experts.named_parameters(recurse=False)},
-            {"w13_E2FD", "w2_EDF"},
-        )
-        self.assertEqual(tuple(experts.w13_E2FD.shape), (2, 2, 8, 4))
-        weight_EOI = experts.w13_E2FD.flatten(1, 2)
-        self.assertEqual(tuple(weight_EOI.shape), (2, 16, 4))
-        self.assertEqual(
-            weight_EOI.untyped_storage().data_ptr(),
-            experts.w13_E2FD.untyped_storage().data_ptr(),
-        )
-
-    def test_grouped_experts_state_uses_native_weight(self):
-        """Native state keys match the module's physical parameter FQNs."""
-        source = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-        with torch.no_grad():
-            source.w13_E2FD.copy_(torch.randn_like(source.w13_E2FD))
-            source.w2_EDF.copy_(torch.randn_like(source.w2_EDF))
-
-        state_dict = source.state_dict()
-        self.assertEqual(set(state_dict), {"w13_E2FD", "w2_EDF"})
 
     def test_token_choice_router_uses_normalization_epsilon(self):
         x_TD = torch.zeros(1, 4)
@@ -409,7 +380,8 @@ class TestMoE(unittest.TestCase):
                 ),
                 routed_experts=SimpleNamespace(
                     sharding_config=None,
-                    inner_experts=SimpleNamespace(sharding_config=None),
+                    w13=SimpleNamespace(sharding_config=None),
+                    w2=SimpleNamespace(sharding_config=None),
                 ),
             )
 
@@ -458,7 +430,8 @@ class TestMoE(unittest.TestCase):
         )
         self.assertEqual(tp_type(routed.sharding_config.out_src_shardings), spmd.R)
         self.assertEqual(tp_type(routed.sharding_config.out_dst_shardings), spmd.R)
-        self.assertIsNone(routed.inner_experts.sharding_config)
+        self.assertIsNone(routed.w13.sharding_config)
+        self.assertIsNone(routed.w2.sharding_config)
 
 
 if __name__ == "__main__":
