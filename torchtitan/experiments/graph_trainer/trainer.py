@@ -148,6 +148,10 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
+        if "optimizer" in config.cuda_graph.components:
+            raise ValueError(
+                "Optimizer CUDA graphs are not supported with GraphTrainer."
+            )
         validate_memory_policy_config(config.compile)
         super().__init__(
             config,
